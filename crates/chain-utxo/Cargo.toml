@@ -10,7 +10,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shadowallet-chain-utxo"
 readme = "../../README.md"
 keywords = ["utxo", "bitcoin", "wallet"]
-categories = ["cryptocurrency", "finance"]
+categories = ["cryptography", "finance"]
 
 [dependencies]
 serde.workspace = true

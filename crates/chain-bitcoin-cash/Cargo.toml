@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shadowallet-chain-bitcoin-cash"
 readme = "../../README.md"
 keywords = ["bitcoin-cash", "wallet", "utxo"]
-categories = ["cryptocurrency", "finance"]
+categories = ["cryptography", "finance"]
 description = "Bitcoin Cash signing proof of concept: CashAddr, ForkID sighash and P2PKH."
 
 [dependencies]

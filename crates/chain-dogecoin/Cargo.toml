@@ -10,7 +10,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shadowallet-chain-dogecoin"
 readme = "../../README.md"
 keywords = ["dogecoin", "wallet", "utxo"]
-categories = ["cryptocurrency", "finance"]
+categories = ["cryptography", "finance"]
 
 [dependencies]
 shadowallet-chain-core = { path = "../chain-core", version = "0.1.0-alpha.1" }

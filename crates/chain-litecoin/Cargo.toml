@@ -10,7 +10,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shadowallet-chain-litecoin"
 readme = "../../README.md"
 keywords = ["litecoin", "wallet", "utxo"]
-categories = ["cryptocurrency", "finance"]
+categories = ["cryptography", "finance"]
 
 [dependencies]
 shadowallet-chain-core = { path = "../chain-core", version = "0.1.0-alpha.1" }
