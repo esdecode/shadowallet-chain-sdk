@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shadowallet-chain-utxo"
+readme = "../../README.md"
+keywords = ["utxo", "bitcoin", "wallet"]
+categories = ["cryptocurrency", "finance"]
 
 [dependencies]
 serde.workspace = true

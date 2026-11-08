@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shadowallet-chain-dogecoin"
+readme = "../../README.md"
+keywords = ["dogecoin", "wallet", "utxo"]
+categories = ["cryptocurrency", "finance"]
 
 [dependencies]
 shadowallet-chain-core = { path = "../chain-core", version = "0.1.0-alpha.1" }

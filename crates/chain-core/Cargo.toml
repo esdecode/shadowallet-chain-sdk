@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shadowallet-chain-core"
+readme = "../../README.md"
+keywords = ["core", "blockchain", "wallet"]
+categories = ["cryptography", "api-bindings"]
 
 [dependencies]
 serde.workspace = true

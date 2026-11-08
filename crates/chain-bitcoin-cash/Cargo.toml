@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shadowallet-chain-bitcoin-cash"
+readme = "../../README.md"
+keywords = ["bitcoin-cash", "wallet", "utxo"]
+categories = ["cryptocurrency", "finance"]
 description = "Bitcoin Cash signing proof of concept: CashAddr, ForkID sighash and P2PKH."
 
 [dependencies]
