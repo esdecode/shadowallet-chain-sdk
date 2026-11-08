@@ -1,0 +1,25 @@
+[package]
+name = "shadowallet-chain-bitcoin-cash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bitcoin Cash signing proof of concept: CashAddr, ForkID sighash and P2PKH."
+
+[dependencies]
+shadowallet-chain-core = { path = "../chain-core", version = "0.1.0-alpha.1" }
+shadowallet-chain-utxo = { path = "../chain-utxo", version = "0.1.0-alpha.1" }
+bitcoin.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+hex.workspace = true
+bdk_bitcoind_rpc.workspace = true
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+bdk_bitcoind_rpc.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "shadowallet-chain-litecoin"
+description = "Watch-only Litecoin addresses, unsigned transaction preparation and external finalization."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+shadowallet-chain-core = { path = "../chain-core", version = "0.1.0-alpha.1" }
+shadowallet-chain-utxo = { path = "../chain-utxo", version = "0.1.0-alpha.1" }
+litecoin.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+bdk_bitcoind_rpc.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

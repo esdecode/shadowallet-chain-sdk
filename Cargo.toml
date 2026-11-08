@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chain-core",
+    "crates/chain-utxo",
+    "crates/chain-litecoin",
+    "crates/chain-bitcoin",
+    "crates/chain-dogecoin",
+    "crates/chain-bitcoin-cash",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.2"
+bdk_bitcoind_rpc = "0.22.1"
+bdk_wallet = { version = "3.2.0", features = ["keys-bip39", "rusqlite"] }
+bdk_chain = { version = "0.23.4", features = ["serde", "rusqlite"] }
+bdk_esplora = { version = "0.22.3", default-features = false, features = ["std", "blocking-https-native"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+litecoin = "=0.32.8-rc.1"
+doge = { package = "bitcoin-dogecoin", version = "=0.32.7-doge.0" }
+bitcoin = "0.32"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

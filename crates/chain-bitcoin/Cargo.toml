@@ -1,0 +1,25 @@
+[package]
+name = "shadowallet-chain-bitcoin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Watch-only Bitcoin (BDK) synchronization, PSBT construction and finalization."
+
+[dependencies]
+shadowallet-chain-utxo = { path = "../chain-utxo", version = "0.1.0-alpha.1" }
+bdk_bitcoind_rpc.workspace = true
+bdk_chain.workspace = true
+bdk_esplora.workspace = true
+bdk_wallet.workspace = true
+bitcoin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "shadowallet-chain-utxo"
+description = "UTXO balance, history, fee-policy and persistence contracts for the Shadowallet Chain SDK."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
