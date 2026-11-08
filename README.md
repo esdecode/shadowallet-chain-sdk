@@ -19,6 +19,7 @@ performed. Do not use with mainnet funds.
 
 ```
 shadowallet-chain-core      identities, errors, SignRequest, ExternalSigner
+shadowallet-chain-bitcoin   watch-only BDK engine, Esplora/Core sync, PSBT
 shadowallet-chain-utxo      balances, history, fee policy, coin selection, UtxoStore
 shadowallet-chain-litecoin  watch-only BIP84/P2WPKH build, Core RPC, SQLite, finalize
 shadowallet-chain-dogecoin  watch-only BIP44/P2PKH build, Core RPC, SQLite, finalize
@@ -51,7 +52,7 @@ use shadowallet_chain_litecoin::{prepare_transfer, signing_request, LtcAccount, 
 use shadowallet_chain_utxo::Utxo;
 
 let account = LtcAccount::from_xpub(LtcNetwork::Regtest, "tpub...", [0,0,0,0])?;
-let unsigned = prepare_transfer(&account, &utxos, &destination, 50_000, 1_000, 0)?;
+let unsigned = prepare_transfer(&account, &utxos, &destination, 50_000, 1, 0)?;
 assert!(unsigned.is_unsigned());
 let request = signing_request(&account, &unsigned)?;
 // Hand `request` to your authorized signer, then:
@@ -93,7 +94,7 @@ cargo doc --workspace --no-deps
 ```
 
 LTC/DOGE regtest E2E is executed by the Shadowallet integration suite; the SDK
-TSDK unit/vector tests run standalone. See `docs/sdk-extraction-report.md` and
+unit/vector tests run standalone. See `docs/sdk-extraction-report.md` and
 `docs/component-ownership.md`.
 
 ## License
