@@ -7,6 +7,7 @@ members = [
     "crates/chain-bitcoin",
     "crates/chain-dogecoin",
     "crates/chain-bitcoin-cash",
+    "crates/chain-evm",
 ]
 
 [workspace.package]
@@ -26,12 +27,20 @@ getrandom = "0.2"
 bdk_bitcoind_rpc = "0.22.1"
 bdk_wallet = { version = "3.2.0", features = ["keys-bip39", "rusqlite"] }
 bdk_chain = { version = "0.23.4", features = ["serde", "rusqlite"] }
-bdk_esplora = { version = "0.22.3", default-features = false, features = ["std", "blocking-https-native"] }
+bdk_esplora = { version = "0.22.3", default-features = false, features = ["std", "async-https-rustls", "tokio"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 litecoin = "=0.32.8-rc.1"
 doge = { package = "bitcoin-dogecoin", version = "=0.32.7-doge.0" }
 bitcoin = "0.32"
+bytes = "1"
+primitive-types = "0.13"
+rlp = "0.6"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+bip32 = { version = "0.6", features = ["alloc"] }
+sha3 = "0.10"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+secp256k1 = { version = "0.31", features = ["recovery", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

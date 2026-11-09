@@ -1,0 +1,39 @@
+[package]
+name = "shadowallet-chain-evm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shadowallet-chain-evm = { path = ".." }
+rlp = "0.6"
+
+[[bin]]
+name = "fuzz_finalize"
+path = "fuzz_targets/fuzz_finalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_abi_string"
+path = "fuzz_targets/fuzz_abi_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_checksum"
+path = "fuzz_targets/fuzz_checksum.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

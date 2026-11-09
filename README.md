@@ -14,6 +14,7 @@ performed. Do not use with mainnet funds.
 | Litecoin | xpub / BIP84 P2WPKH | yes | yes (verify + finalize) | yes (Litecoin Core) | alpha, regtest E2E in app |
 | Dogecoin | xpub / BIP44 P2PKH | yes | yes (verify + finalize) | yes (Dogecoin Core 1.14) | alpha, regtest E2E in app |
 | Bitcoin Cash | xpub / BIP44 P2PKH | yes | yes (BCH ForkID) | yes (BCHN Core) | alpha, BCHN regtest E2E |
+| EVM (ETH/Anvil) | BIP44 m/44'/60'/0'/0/i | yes (EIP-1559) | yes (digest + finalize) | yes (Alloy HTTP) | alpha, Anvil native/ERC-20 E2E |
 
 ## Architecture
 
@@ -24,6 +25,7 @@ shadowallet-chain-utxo      balances, history, fee policy, coin selection, UtxoS
 shadowallet-chain-litecoin  watch-only BIP84/P2WPKH build, Core RPC, SQLite, finalize
 shadowallet-chain-dogecoin  watch-only BIP44/P2PKH build, Core RPC, SQLite, finalize
 shadowallet-chain-bitcoin-cash CashAddr, ForkID, Core RPC, SQLite, P2PKH engine
+shadowallet-chain-evm 0.1.0-alpha.2 (unpublished)  Alloy profiles, BIP44, RPC, ERC-20, EIP-1559, SQLite state
 ```
 
 The SDK does **not** include Shadowallet's UWV2 vault, Flutter UI, sessions,

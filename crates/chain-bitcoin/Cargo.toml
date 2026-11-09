@@ -1,6 +1,6 @@
 [package]
 name = "shadowallet-chain-bitcoin"
-version.workspace = true
+version = "0.1.0-alpha.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -21,11 +21,14 @@ bdk_wallet.workspace = true
 bitcoin.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 thiserror.workspace = true
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — Phase 5.1 EVM hardening
+
+- SQLite state: accounts, nonces, transactions, tokens, sync checkpoints.
+- Transactional nonce reservation, release, replacement, expiry and restart
+  reconciliation.
+- History abstraction with explicit outgoing-only completeness and ERC-20
+  Transfer log decoding.
+- Fee quotes with base fee, caps, checked total cost; BSC/L2 fail closed.
+- ERC-20 name/metadata cache and receipt Transfer validation.
+- Watch-only accounts can no longer sign (removed random signer).
+- Removed Alloy core/provider/signer/ABI dependencies. EIP-155/1559 RLP,
+  ERC-20 ABI and checksum addresses are implemented in-crate; signing uses
+  libsecp256k1.
+- Raw `cargo audit` and `cargo deny check`: clean.
+- Added BSC legacy EIP-155 E2E, independent `eth_account` vectors, cross-
+  connection nonce locking and RPC timeout/size limits.
+- Not published.
+
+## Unreleased — Phase 5 EVM
+
+- Added `shadowallet-chain-evm`: Alloy 1.8 provider, BIP44 account derivation,
+  chain profiles, EIP-1559 external signing, ERC-20 reads/transfers, Anvil
+  native and ERC-20 E2E.
+- Not published; existing 0.1.0-alpha.1 crates remain unchanged.
+
 ## 0.1.0-alpha.1 (2026-11-08)
 
 - Added watch-only Litecoin/Dogecoin Core RPC synchronization, exact balances

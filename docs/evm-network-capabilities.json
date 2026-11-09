@@ -1,0 +1,13 @@
+{
+  "generated": "2026-11-09",
+  "signing_enabled": false,
+  "networks": [
+    {"name":"ethereum","chain_id":1,"read_only_rpc":false,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":true,"erc20_transfer_build":true,"local_e2e":true,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["public RPC not queried in this phase"]},
+    {"name":"sepolia","chain_id":11155111,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":true,"erc20_transfer_build":true,"local_e2e":true,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["no funded signing account"]},
+    {"name":"polygon","chain_id":137,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":true,"erc20_transfer_build":true,"local_e2e":true,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["public network read-only"]},
+    {"name":"bsc","chain_id":56,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":true,"erc20_transfer_build":true,"local_e2e":true,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["legacy EIP-155 only","Anvil chain-56 E2E passed"]},
+    {"name":"arbitrum","chain_id":42161,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":false,"erc20_transfer_build":false,"local_e2e":false,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["L1 data fee not modelled","sends fail closed"]},
+    {"name":"optimism","chain_id":10,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":false,"erc20_transfer_build":false,"local_e2e":false,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["L1 data fee not modelled","sends fail closed"]},
+    {"name":"base","chain_id":8453,"read_only_rpc":true,"native_balance":true,"erc20_balance":true,"gas_estimate":true,"native_transfer_build":false,"erc20_transfer_build":false,"local_e2e":false,"public_testnet_verified":false,"mainnet_signing_enabled":false,"limitations":["L1 data fee not modelled","sends fail closed"]}
+  ]
+}

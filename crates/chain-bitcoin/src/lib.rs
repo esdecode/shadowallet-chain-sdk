@@ -144,10 +144,14 @@ impl BitcoinEngine {
     /// Full/incremental scan through Esplora. The endpoint is untrusted input:
     /// it can supply chain data, never authorization.
     pub fn sync_esplora(&mut self, url: &str) -> Result<SyncReport, BitcoinError> {
-        let client = bdk_esplora::esplora_client::Builder::new(url).build_blocking();
-        let request = self.wallet.start_full_scan();
-        let update = bdk_esplora::EsploraExt::full_scan(&client, request, 20, 1)
+        let client = bdk_esplora::esplora_client::Builder::new(url)
+            .build_async()
             .map_err(|e| BitcoinError::Network(e.to_string()))?;
+        let request = self.wallet.start_full_scan();
+        let update = block_on(bdk_esplora::EsploraAsyncExt::full_scan(
+            &client, request, 20, 1,
+        ))
+        .map_err(|e| BitcoinError::Network(e.to_string()))?;
         let before = self.wallet.transactions().count();
         self.wallet
             .apply_update(update)
@@ -482,12 +486,21 @@ impl BitcoinEngine {
         let tx: bdk_wallet::bitcoin::Transaction =
             bdk_wallet::bitcoin::consensus::deserialize(raw_transaction)
                 .map_err(|e| BitcoinError::Engine(e.to_string()))?;
-        let client = bdk_esplora::esplora_client::Builder::new(url).build_blocking();
-        client
-            .broadcast(&tx)
+        let client = bdk_esplora::esplora_client::Builder::new(url)
+            .build_async()
             .map_err(|e| BitcoinError::Network(e.to_string()))?;
+        block_on(client.broadcast(&tx)).map_err(|e| BitcoinError::Network(e.to_string()))?;
         Ok(tx.compute_txid().to_string())
     }
+}
+
+#[allow(clippy::expect_used)] // runtime creation failure is fatal and not recoverable
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(future)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -561,9 +574,10 @@ impl BitcoinEngine {
 
     /// Live fee estimates from Esplora (`/fee-estimates`, sat/vB by target).
     pub fn estimate_fees_esplora(url: &str) -> Result<FeeEstimates, BitcoinError> {
-        let client = bdk_esplora::esplora_client::Builder::new(url).build_blocking();
-        let estimates = client
-            .get_fee_estimates()
+        let client = bdk_esplora::esplora_client::Builder::new(url)
+            .build_async()
+            .map_err(|e| BitcoinError::Network(e.to_string()))?;
+        let estimates = block_on(client.get_fee_estimates())
             .map_err(|e| BitcoinError::Network(e.to_string()))?;
         let pick = |target: u16| -> Result<u64, BitcoinError> {
             // Use the estimate for the closest target at or above the requested
