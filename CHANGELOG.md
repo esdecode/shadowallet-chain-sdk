@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — Phase 5.12 SQLite security remediation (candidate)
+
+- Removed BDK's `rusqlite` feature. `bdk_chain 0.23.4` pins `rusqlite 0.31`
+  (`libsqlite3-sys 0.28`, SQLite 3.45.0), which is affected by
+  RUSTSEC-2026-0459.
+- `shadowallet-chain-bitcoin` now implements `WalletPersister` on
+  `rusqlite 0.41` / `libsqlite3-sys 0.39.1` / bundled SQLite 3.54.1.
+- Wallet state is stored as an atomic, compacting JSON changeset log. Databases
+  written by BDK's SQLite backend are imported once, read-only, with pinned
+  schema-version checks; unsupported versions fail closed.
+- All direct SDK SQLite users moved to `rusqlite 0.41`.
+- Removed the repository-local `[patch.crates-io]` rusqlite fork.
+- Added database creation, reopen, legacy import, corruption rejection,
+  schema-version, integrity-check and log-compaction tests.
+- Candidate versions: core/utxo unchanged; bitcoin 0.1.0-alpha.3,
+  bitcoin-cash/dogecoin/litecoin 0.1.0-alpha.2, evm 0.1.0-alpha.3.
+- Not published.
+
 ## Unreleased — Phase 5.1 EVM hardening
 
 - SQLite state: accounts, nonces, transactions, tokens, sync checkpoints.

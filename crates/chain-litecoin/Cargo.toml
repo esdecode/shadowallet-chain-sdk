@@ -1,7 +1,7 @@
 [package]
 name = "shadowallet-chain-litecoin"
 description = "Watch-only Litecoin addresses, unsigned transaction preparation and external finalization."
-version.workspace = true
+version = "0.1.0-alpha.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

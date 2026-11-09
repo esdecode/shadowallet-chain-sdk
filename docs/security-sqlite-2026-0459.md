@@ -6,35 +6,49 @@
 - Crafted database + sibling `-wal` with mismatched page size can return
   uninitialized page-cache bytes (local information disclosure).
 - Fixed: `libsqlite3-sys >= 0.39.0` / `rusqlite 0.41`.
-- Bundled SQLite currently resolved: **3.45.0**.
+- Affected bundled releases: `0.6.0 ..= 0.38.2`.
 
-## Dependency path
+## Original dependency path
 
 ```
-bdk_chain 0.23.4
+bdk_chain 0.23.4 (feature "rusqlite")
   -> rusqlite 0.31.0
-     -> libsqlite3-sys 0.28.0
-  -> bdk_wallet 3.2.0
+     -> libsqlite3-sys 0.28.0 (SQLite 3.45.0)
 shadowallet-chain-{bitcoin,bitcoin-cash,dogecoin,litecoin,evm}
   -> rusqlite 0.31.0
 ```
 
-`bdk_wallet` 3.2.0 and upstream `bdk_chain` main still declare
-`rusqlite = "0.31"`. Cargo cannot unify `rusqlite 0.31` and `0.41` because both
-link native library `sqlite3`.
+Latest crates.io releases (`bdk_wallet` 3.2.0, `bdk_chain` 0.23.4) still
+declare `rusqlite = "0.31"`. No upstream release fixes the graph.
 
-## Why no local upgrade is safe
+## Resolution (Phase 5.12 candidate)
 
-- Upgrading only this workspace's direct `rusqlite` leaves BDK's vulnerable
-  copy in the graph.
-- Patching `libsqlite3-sys` to 0.39 violates BDK's `^0.28` requirement.
-- Vendoring SQLite 3.54 into `libsqlite3-sys 0.28` leaves the advisory version
-  match in place and would not produce a clean `cargo audit`.
-- Disabling BDK's `rusqlite` feature changes wallet persistence semantics and
-  requires a tested migration; it is not a drop-in alpha fix.
+- BDK is compiled **without** the `rusqlite` feature. BDK's SQLite feature is
+  optional and only supplies schema helpers.
+- `shadowallet-chain-bitcoin` implements `bdk_wallet::WalletPersister` on
+  `rusqlite 0.41` directly:
+  - atomic changeset log + compaction;
+  - one-time read-only import of legacy BDK SQLite tables;
+  - pinned schema-version checks; unknown/newer versions fail closed.
+- All direct `rusqlite` users moved to 0.41.
+- The local vendored `rusqlite` fork and `[patch.crates-io]` were removed.
+
+Resolved graph:
+
+```
+rusqlite 0.41.1 -> libsqlite3-sys 0.39.1 -> bundled SQLite 3.54.1
+```
+
+## Verification
+
+- `cargo tree -i libsqlite3-sys`: only 0.39.1.
+- `cargo audit`: clean.
+- `cargo deny check`: advisories/bans/licenses/sources ok.
+- Packaged-crate external consumer resolves and runs with SQLite 3.54.1.
+- Persistence tests cover creation, reopen, legacy import, corruption,
+  schema versions, integrity and compaction.
 
 ## Status
 
-**BLOCKED upstream.** No SDK release candidate can claim remediation until BDK
-publishes a `rusqlite 0.41`/`libsqlite3-sys 0.39` dependency. No advisory is
-ignored and no publication was performed.
+**REMEDIATED in the 0.1.0-alpha.3 candidate set; not yet published.** No
+advisory is ignored or suppressed.

@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0-alpha.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/esdecode/shadowallet-chain-sdk"
 homepage = "https://github.com/esdecode/shadowallet-chain-sdk"
@@ -25,11 +25,11 @@ sha2 = "0.10"
 hex = "0.4"
 getrandom = "0.2"
 bdk_bitcoind_rpc = "0.22.1"
-bdk_wallet = { version = "3.2.0", features = ["keys-bip39", "rusqlite"] }
-bdk_chain = { version = "0.23.4", features = ["serde", "rusqlite"] }
+bdk_wallet = { version = "3.2.0", features = ["keys-bip39"] }
+bdk_chain = { version = "0.23.4", features = ["serde"] }
 bdk_esplora = { version = "0.22.3", default-features = false, features = ["std", "async-https-rustls", "tokio"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 litecoin = "=0.32.8-rc.1"
 doge = { package = "bitcoin-dogecoin", version = "=0.32.7-doge.0" }
 bitcoin = "0.32"
@@ -50,8 +50,3 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 
-[patch.crates-io]
-# LOCAL SECURITY CANDIDATE ONLY: rusqlite 0.31 API with libsqlite3-sys 0.39
-# (SQLite 3.54.1). Cargo ignores [patch] for downstream consumers, so published
-# crates remain unfixed until BDK/rusqlite are updated upstream.
-rusqlite = { path = "third_party/rusqlite" }

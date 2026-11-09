@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, OutPoint, address::NetworkChecked};
-use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use thiserror::Error;
+
+pub mod sqlite_store;
+pub use sqlite_store::{SqliteStore, SqliteStoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -118,9 +120,9 @@ impl std::fmt::Debug for WatchDescriptors {
 }
 
 pub struct BitcoinEngine {
-    wallet: PersistedWallet<Connection>,
+    wallet: PersistedWallet<SqliteStore>,
     descriptors: WatchDescriptors,
-    conn: Connection,
+    store: SqliteStore,
     db_path: PathBuf,
 }
 
@@ -215,17 +217,17 @@ impl BitcoinEngine {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| BitcoinError::Storage(e.to_string()))?;
         }
-        let mut conn =
-            Connection::open(db_path).map_err(|e| BitcoinError::Storage(e.to_string()))?;
+        let mut store =
+            SqliteStore::open(db_path).map_err(|e| BitcoinError::Storage(e.to_string()))?;
         // BDK persists public descriptors and chain data only.
         let wallet = Wallet::create(descriptors.external.clone(), descriptors.internal.clone())
             .network(descriptors.network.network())
-            .create_wallet(&mut conn)
+            .create_wallet(&mut store)
             .map_err(|e| BitcoinError::Storage(e.to_string()))?;
         Ok(Self {
             wallet,
             descriptors,
-            conn,
+            store,
             db_path: db_path.to_owned(),
         })
     }
@@ -237,17 +239,17 @@ impl BitcoinEngine {
         if !db_path.exists() {
             return Ok(None);
         }
-        let mut conn =
-            Connection::open(db_path).map_err(|e| BitcoinError::Storage(e.to_string()))?;
+        let mut store =
+            SqliteStore::open(db_path).map_err(|e| BitcoinError::Storage(e.to_string()))?;
         let wallet = Wallet::load()
             .descriptor(KeychainKind::External, Some(descriptors.external.clone()))
             .descriptor(KeychainKind::Internal, Some(descriptors.internal.clone()))
-            .load_wallet(&mut conn)
+            .load_wallet(&mut store)
             .map_err(|e| BitcoinError::Storage(e.to_string()))?;
         Ok(wallet.map(|wallet| Self {
             wallet,
             descriptors,
-            conn,
+            store,
             db_path: db_path.to_owned(),
         }))
     }
@@ -277,7 +279,7 @@ impl BitcoinEngine {
 
     pub fn persist(&mut self) -> Result<(), BitcoinError> {
         self.wallet
-            .persist(&mut self.conn)
+            .persist(&mut self.store)
             .map_err(|e| BitcoinError::Storage(e.to_string()))?;
         Ok(())
     }
