@@ -49,3 +49,9 @@ unsafe_code = "forbid"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[patch.crates-io]
+# LOCAL SECURITY CANDIDATE ONLY: rusqlite 0.31 API with libsqlite3-sys 0.39
+# (SQLite 3.54.1). Cargo ignores [patch] for downstream consumers, so published
+# crates remain unfixed until BDK/rusqlite are updated upstream.
+rusqlite = { path = "third_party/rusqlite" }
