@@ -137,6 +137,49 @@ pub struct TxEffect {
     pub token_deltas: Vec<(Pubkey, i128)>,
 }
 
+/// What kind of value moved in an explicit top-level transfer instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedTransferKind {
+    Sol,
+    Token,
+}
+
+/// A transfer the transaction states explicitly in a top-level System or SPL
+/// Token instruction. Nothing here is inferred from balance changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTransfer {
+    pub kind: ParsedTransferKind,
+    /// System: the source wallet. Token: the signing authority.
+    pub from: Pubkey,
+    /// System: the destination wallet. Token: the destination token account.
+    pub to: Pubkey,
+    /// Token only: owner of the destination token account, when the ledger's
+    /// token balances name it.
+    pub to_owner: Option<Pubkey>,
+    /// Token only: mint, when stated (`transferChecked`) or resolvable from
+    /// the token balances.
+    pub mint: Option<Pubkey>,
+    pub amount: u64,
+    pub decimals: Option<u8>,
+}
+
+/// Balance effect plus the explicit transfers and an honest flag for what the
+/// parser could not explain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxDetails {
+    pub effect: TxEffect,
+    pub transfers: Vec<ParsedTransfer>,
+    /// Distinct program ids of top-level instructions that are not plain
+    /// transfers (compute budget excluded).
+    pub other_programs: Vec<String>,
+    /// Cross-program invocations exist; transfers inside them are not listed.
+    pub has_inner_instructions: bool,
+}
+
+const TOKEN_PROGRAM_NAMES: [&str; 2] = ["spl-token", "spl-token-2022"];
+const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
+const MAX_PARSED_INSTRUCTIONS: usize = 64;
+
 #[derive(Clone)]
 pub struct SolanaRpc {
     transport: Arc<dyn Transport>,
@@ -158,6 +201,15 @@ fn invalid(what: &str) -> SolanaError {
 
 fn as_u64(value: &Value, what: &str) -> Result<u64, SolanaError> {
     value.as_u64().ok_or_else(|| invalid(what))
+}
+
+/// Account key as either a plain base58 string (`json` encoding) or an
+/// object with a `pubkey` field (`jsonParsed` encoding).
+fn key_of(value: &Value, what: &str) -> Result<Pubkey, SolanaError> {
+    match value.get("pubkey") {
+        Some(inner) => pubkey_of(inner, what),
+        None => pubkey_of(value, what),
+    }
 }
 
 fn pubkey_of(value: &Value, what: &str) -> Result<Pubkey, SolanaError> {
@@ -551,17 +603,29 @@ impl SolanaRpc {
             .collect()
     }
 
-    /// Derive the exact balance effect of a transaction on `owner` from the
-    /// ledger's pre/post balances. Nothing is inferred beyond those fields.
+    /// Exact balance effect of a transaction on `owner` (ledger pre/post
+    /// balances only).
     pub async fn get_transaction_effect(
         &self,
         signature: &str,
         owner: &Pubkey,
     ) -> Result<Option<TxEffect>, SolanaError> {
+        Ok(self
+            .get_transaction_details(signature, owner)
+            .await?
+            .map(|d| d.effect))
+    }
+
+    /// Balance effect plus the explicit top-level transfers, for history.
+    pub async fn get_transaction_details(
+        &self,
+        signature: &str,
+        owner: &Pubkey,
+    ) -> Result<Option<TxDetails>, SolanaError> {
         let result = self
             .call(
                 "getTransaction",
-                json!([signature, {"encoding": "json", "commitment": "confirmed",
+                json!([signature, {"encoding": "jsonParsed", "commitment": "confirmed",
                                    "maxSupportedTransactionVersion": 0}]),
                 true,
             )
@@ -569,50 +633,181 @@ impl SolanaRpc {
         if result.is_null() {
             return Ok(None);
         }
-        let meta = &result["meta"];
-        let keys: Vec<Pubkey> = result["transaction"]["message"]["accountKeys"]
-            .as_array()
-            .ok_or_else(|| invalid("account keys"))?
-            .iter()
-            .map(|k| pubkey_of(k, "account key"))
-            .collect::<Result<_, _>>()?;
-        let pre = meta["preBalances"]
-            .as_array()
-            .ok_or_else(|| invalid("pre"))?;
-        let post = meta["postBalances"]
-            .as_array()
-            .ok_or_else(|| invalid("post"))?;
-        if pre.len() != keys.len() || post.len() != keys.len() {
-            return Err(invalid("balance array length"));
+        parse_details(&result, signature, owner).map(Some)
+    }
+}
+
+fn parse_details(
+    result: &Value,
+    signature: &str,
+    owner: &Pubkey,
+) -> Result<TxDetails, SolanaError> {
+    let meta = &result["meta"];
+    let keys: Vec<Pubkey> = result["transaction"]["message"]["accountKeys"]
+        .as_array()
+        .ok_or_else(|| invalid("account keys"))?
+        .iter()
+        .map(|k| key_of(k, "account key"))
+        .collect::<Result<_, _>>()?;
+    let pre = meta["preBalances"]
+        .as_array()
+        .ok_or_else(|| invalid("pre"))?;
+    let post = meta["postBalances"]
+        .as_array()
+        .ok_or_else(|| invalid("post"))?;
+    if pre.len() != keys.len() || post.len() != keys.len() {
+        return Err(invalid("balance array length"));
+    }
+    let mut native_delta = 0i128;
+    if let Some(index) = keys.iter().position(|k| k == owner) {
+        native_delta =
+            i128::from(as_u64(&post[index], "post")?) - i128::from(as_u64(&pre[index], "pre")?);
+    }
+    let mut token_deltas: Vec<(Pubkey, i128)> = Vec::new();
+    let sum = |field: &str, sign: i128, out: &mut Vec<(Pubkey, i128)>| -> Result<(), SolanaError> {
+        for entry in meta[field].as_array().into_iter().flatten() {
+            if entry["owner"].as_str() != Some(&owner.to_base58()) {
+                continue;
+            }
+            let mint = pubkey_of(&entry["mint"], "mint")?;
+            let amount = entry["uiTokenAmount"]["amount"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or_else(|| invalid("token amount"))?;
+            match out.iter_mut().find(|(m, _)| *m == mint) {
+                Some((_, total)) => *total += sign * i128::from(amount),
+                None => out.push((mint, sign * i128::from(amount))),
+            }
         }
-        let mut native_delta = 0i128;
-        if let Some(index) = keys.iter().position(|k| k == owner) {
-            native_delta =
-                i128::from(as_u64(&post[index], "post")?) - i128::from(as_u64(&pre[index], "pre")?);
-        }
-        let mut token_deltas: Vec<(Pubkey, i128)> = Vec::new();
-        let sum =
-            |field: &str, sign: i128, out: &mut Vec<(Pubkey, i128)>| -> Result<(), SolanaError> {
-                for entry in meta[field].as_array().into_iter().flatten() {
-                    if entry["owner"].as_str() != Some(&owner.to_base58()) {
-                        continue;
-                    }
-                    let mint = pubkey_of(&entry["mint"], "mint")?;
-                    let amount = entry["uiTokenAmount"]["amount"]
-                        .as_str()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .ok_or_else(|| invalid("token amount"))?;
-                    match out.iter_mut().find(|(m, _)| *m == mint) {
-                        Some((_, total)) => *total += sign * i128::from(amount),
-                        None => out.push((mint, sign * i128::from(amount))),
-                    }
-                }
-                Ok(())
+        Ok(())
+    };
+    sum("postTokenBalances", 1, &mut token_deltas)?;
+    sum("preTokenBalances", -1, &mut token_deltas)?;
+    token_deltas.retain(|(_, d)| *d != 0);
+
+    // token account -> (owner, mint), from the ledger's token balances.
+    let mut token_accounts: Vec<(Pubkey, Option<Pubkey>, Option<Pubkey>)> = Vec::new();
+    for field in ["postTokenBalances", "preTokenBalances"] {
+        for entry in meta[field].as_array().into_iter().flatten() {
+            let Some(index) = entry["accountIndex"]
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+            else {
+                continue;
             };
-        sum("postTokenBalances", 1, &mut token_deltas)?;
-        sum("preTokenBalances", -1, &mut token_deltas)?;
-        token_deltas.retain(|(_, d)| *d != 0);
-        Ok(Some(TxEffect {
+            let Some(account) = keys.get(index) else {
+                continue;
+            };
+            let token_owner = entry["owner"]
+                .as_str()
+                .and_then(|o| Pubkey::from_base58(o).ok());
+            let mint = entry["mint"]
+                .as_str()
+                .and_then(|m| Pubkey::from_base58(m).ok());
+            if !token_accounts.iter().any(|(a, _, _)| a == account) {
+                token_accounts.push((*account, token_owner, mint));
+            }
+        }
+    }
+
+    let mut transfers = Vec::new();
+    let mut other_programs: Vec<String> = Vec::new();
+    let mut note_other = |program: &str| {
+        if program != COMPUTE_BUDGET && !other_programs.iter().any(|p| p == program) {
+            other_programs.push(program.to_owned());
+        }
+    };
+    let instructions = result["transaction"]["message"]["instructions"]
+        .as_array()
+        .ok_or_else(|| invalid("instructions"))?;
+    for ix in instructions.iter().take(MAX_PARSED_INSTRUCTIONS) {
+        let program_id = ix["programId"].as_str().unwrap_or("unknown");
+        let program = ix["program"].as_str().unwrap_or("");
+        let kind = ix["parsed"]["type"].as_str().unwrap_or("");
+        let info = &ix["parsed"]["info"];
+        match (program, kind) {
+            ("system", "transfer") => {
+                let from = pubkey_of(&info["source"], "transfer source");
+                let to = pubkey_of(&info["destination"], "transfer destination");
+                let lamports = info["lamports"].as_u64();
+                match (from, to, lamports) {
+                    (Ok(from), Ok(to), Some(amount)) => transfers.push(ParsedTransfer {
+                        kind: ParsedTransferKind::Sol,
+                        from,
+                        to,
+                        to_owner: None,
+                        mint: None,
+                        amount,
+                        decimals: None,
+                    }),
+                    _ => note_other(program_id),
+                }
+            }
+            (name, "transfer" | "transferChecked") if TOKEN_PROGRAM_NAMES.contains(&name) => {
+                let source = pubkey_of(&info["source"], "token source");
+                let dest = pubkey_of(&info["destination"], "token destination");
+                let authority = pubkey_of(
+                    if info["authority"].is_null() {
+                        &info["multisigAuthority"]
+                    } else {
+                        &info["authority"]
+                    },
+                    "token authority",
+                );
+                let checked = kind == "transferChecked";
+                let amount = if checked {
+                    info["tokenAmount"]["amount"]
+                        .as_str()
+                        .and_then(|a| a.parse::<u64>().ok())
+                } else {
+                    info["amount"].as_str().and_then(|a| a.parse::<u64>().ok())
+                };
+                let (Ok(source), Ok(dest), Ok(authority), Some(amount)) =
+                    (source, dest, authority, amount)
+                else {
+                    note_other(program_id);
+                    continue;
+                };
+                let mint = if checked {
+                    info["mint"]
+                        .as_str()
+                        .and_then(|m| Pubkey::from_base58(m).ok())
+                } else {
+                    token_accounts
+                        .iter()
+                        .find(|(a, _, _)| *a == source)
+                        .and_then(|(_, _, m)| *m)
+                };
+                let to_owner = token_accounts
+                    .iter()
+                    .find(|(a, _, _)| *a == dest)
+                    .and_then(|(_, o, _)| *o);
+                transfers.push(ParsedTransfer {
+                    kind: ParsedTransferKind::Token,
+                    from: authority,
+                    to: dest,
+                    to_owner,
+                    mint,
+                    amount,
+                    decimals: checked
+                        .then(|| info["tokenAmount"]["decimals"].as_u64())
+                        .flatten()
+                        .and_then(|d| u8::try_from(d).ok()),
+                });
+            }
+            _ => note_other(program_id),
+        }
+    }
+    if instructions.len() > MAX_PARSED_INSTRUCTIONS {
+        note_other("more-instructions-than-parsed");
+    }
+    let has_inner_instructions = meta["innerInstructions"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|i| i["instructions"].as_array().is_some_and(|x| !x.is_empty()))
+    });
+
+    Ok(TxDetails {
+        effect: TxEffect {
             signature: signature.to_owned(),
             slot: as_u64(&result["slot"], "slot")?,
             block_time: result["blockTime"].as_i64(),
@@ -620,8 +815,11 @@ impl SolanaRpc {
             failed: !meta["err"].is_null(),
             native_delta,
             token_deltas,
-        }))
-    }
+        },
+        transfers,
+        other_programs,
+        has_inner_instructions,
+    })
 }
 
 #[cfg(test)]
@@ -770,7 +968,8 @@ mod tests {
         let other = Pubkey([5; 32]);
         let tx = json!({
             "slot": 10, "blockTime": 1700000000,
-            "transaction": {"message": {"accountKeys": [owner.to_base58(), other.to_base58()]}},
+            "transaction": {"message": {"accountKeys": [owner.to_base58(), other.to_base58()],
+                                       "instructions": []}},
             "meta": {"fee": 5000, "err": null,
                      "preBalances": [10000, 0], "postBalances": [4000, 1000],
                      "preTokenBalances": [], "postTokenBalances": []}
@@ -784,5 +983,128 @@ mod tests {
         assert_eq!(effect.native_delta, -6000);
         assert_eq!(effect.fee, 5000);
         assert!(!effect.failed);
+    }
+
+    fn parsed_tx(instructions: serde_json::Value, inner: serde_json::Value) -> serde_json::Value {
+        let me = Pubkey([4; 32]);
+        let other = Pubkey([5; 32]);
+        let my_ata = Pubkey([6; 32]);
+        let their_ata = Pubkey([7; 32]);
+        let mint = Pubkey([8; 32]);
+        json!({
+            "slot": 12, "blockTime": 1700000100,
+            "transaction": {"message": {
+                "accountKeys": [
+                    {"pubkey": me.to_base58(), "signer": true},
+                    {"pubkey": other.to_base58(), "signer": false},
+                    {"pubkey": my_ata.to_base58(), "signer": false},
+                    {"pubkey": their_ata.to_base58(), "signer": false}
+                ],
+                "instructions": instructions}},
+            "meta": {"fee": 5000, "err": null,
+                     "preBalances": [10000, 0, 2039280, 2039280],
+                     "postBalances": [3000, 2000, 2039280, 2039280],
+                     "innerInstructions": inner,
+                     "preTokenBalances": [
+                        {"accountIndex": 2, "mint": mint.to_base58(), "owner": me.to_base58(),
+                         "uiTokenAmount": {"amount": "900"}},
+                        {"accountIndex": 3, "mint": mint.to_base58(), "owner": other.to_base58(),
+                         "uiTokenAmount": {"amount": "0"}}],
+                     "postTokenBalances": [
+                        {"accountIndex": 2, "mint": mint.to_base58(), "owner": me.to_base58(),
+                         "uiTokenAmount": {"amount": "400"}},
+                        {"accountIndex": 3, "mint": mint.to_base58(), "owner": other.to_base58(),
+                         "uiTokenAmount": {"amount": "500"}}]}
+        })
+    }
+
+    #[tokio::test]
+    async fn details_report_only_explicit_transfers() {
+        let me = Pubkey([4; 32]);
+        let other = Pubkey([5; 32]);
+        let tx = parsed_tx(
+            json!([
+                {"program": "system", "programId": "11111111111111111111111111111111",
+                 "parsed": {"type": "transfer",
+                            "info": {"source": me.to_base58(), "destination": other.to_base58(),
+                                     "lamports": 2000}}},
+                {"program": "spl-token", "programId": TOKEN_PROGRAM.to_base58(),
+                 "parsed": {"type": "transferChecked",
+                            "info": {"source": Pubkey([6; 32]).to_base58(),
+                                     "destination": Pubkey([7; 32]).to_base58(),
+                                     "mint": Pubkey([8; 32]).to_base58(),
+                                     "authority": me.to_base58(),
+                                     "tokenAmount": {"amount": "500", "decimals": 6}}}},
+                {"programId": COMPUTE_BUDGET, "accounts": [], "data": "3"}
+            ]),
+            json!([]),
+        );
+        let t = Scripted::new(vec![ok(tx)]);
+        let d = rpc(&t)
+            .get_transaction_details("sig", &me)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.effect.native_delta, -7000);
+        assert_eq!(d.effect.token_deltas, vec![(Pubkey([8; 32]), -500)]);
+        assert_eq!(d.transfers.len(), 2);
+        assert_eq!(d.transfers[0].kind, ParsedTransferKind::Sol);
+        assert_eq!(d.transfers[0].to, other);
+        assert_eq!(d.transfers[1].kind, ParsedTransferKind::Token);
+        assert_eq!(d.transfers[1].to_owner, Some(other));
+        assert_eq!(d.transfers[1].mint, Some(Pubkey([8; 32])));
+        assert_eq!(d.transfers[1].decimals, Some(6));
+        assert!(d.other_programs.is_empty(), "compute budget is ignored");
+        assert!(!d.has_inner_instructions);
+        // The request must ask for jsonParsed, version 0 transactions.
+        let requests = t.requests.lock().unwrap();
+        assert_eq!(requests[0]["params"][1]["encoding"], "jsonParsed");
+    }
+
+    #[tokio::test]
+    async fn details_flag_unknown_programs_and_inner_instructions() {
+        let me = Pubkey([4; 32]);
+        let tx = parsed_tx(
+            json!([{"programId": "Swap111111111111111111111111111111111111111",
+                    "accounts": [], "data": "abc"}]),
+            json!([{"index": 0, "instructions": [{"program": "system"}]}]),
+        );
+        let t = Scripted::new(vec![ok(tx)]);
+        let d = rpc(&t)
+            .get_transaction_details("sig", &me)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(d.transfers.is_empty(), "no recipient is invented");
+        assert_eq!(
+            d.other_programs,
+            vec!["Swap111111111111111111111111111111111111111".to_owned()]
+        );
+        assert!(d.has_inner_instructions);
+        assert_eq!(d.effect.native_delta, -7000, "ledger effect is still exact");
+    }
+
+    #[tokio::test]
+    async fn details_reject_malformed_transfer_fields() {
+        let me = Pubkey([4; 32]);
+        let tx = parsed_tx(
+            json!([{"program": "system", "programId": "11111111111111111111111111111111",
+                    "parsed": {"type": "transfer",
+                               "info": {"source": "not-a-key", "destination": "x",
+                                        "lamports": -1}}}]),
+            json!([]),
+        );
+        let t = Scripted::new(vec![ok(tx)]);
+        let d = rpc(&t)
+            .get_transaction_details("sig", &me)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(d.transfers.is_empty());
+        assert_eq!(
+            d.other_programs.len(),
+            1,
+            "unparseable is reported, not hidden"
+        );
     }
 }

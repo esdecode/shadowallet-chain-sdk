@@ -27,7 +27,8 @@ pub use pubkey::{
     associated_token_address, find_program_address,
 };
 pub use rpc::{
-    HttpTransport, SignatureInfo, SolanaRpc, TokenAccount, Transport, TxEffect, TxStatus,
+    HttpTransport, ParsedTransfer, ParsedTransferKind, SignatureInfo, SolanaRpc, TokenAccount,
+    Transport, TxDetails, TxEffect, TxStatus,
 };
 pub use transfer::{
     DecodedInstruction, PreparedTransfer, SignedTransfer, TransferIntent, TransferKind,
