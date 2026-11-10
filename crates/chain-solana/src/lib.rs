@@ -1,6 +1,6 @@
 //! Solana and SPL token support for the Shadowallet Chain SDK.
 //!
-//! Scope (Phase 6): SLIP-0010 Ed25519 derivation, read-only JSON-RPC, legacy
+//! Scope: SLIP-0010 Ed25519 derivation, read-only JSON-RPC, legacy
 //! transaction messages, native SOL transfers, SPL Token / (extension-free)
 //! Token-2022 `TransferChecked`, and restricted external signing.
 //!
@@ -34,3 +34,8 @@ pub use transfer::{
     DecodedInstruction, PreparedTransfer, SignedTransfer, TransferIntent, TransferKind,
     inspect_message, prepare_native_transfer, prepare_spl_transfer,
 };
+
+/// Compiles and runs the README example so it cannot rot.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

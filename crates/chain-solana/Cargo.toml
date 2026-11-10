@@ -7,10 +7,10 @@ license.workspace = true
 description = "Solana/SPL account derivation, read-only RPC, transaction preparation and restricted external signing."
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["solana", "spl", "wallet", "transaction"]
 categories = ["cryptography", "finance"]
-# Not published: Phase 6 work stays local until publication is separately authorized.
+# Not published: publication needs a separate, explicit authorization.
 publish = false
 
 [dependencies]
