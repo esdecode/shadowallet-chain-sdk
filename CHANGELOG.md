@@ -16,7 +16,15 @@
   schema-version, integrity-check and log-compaction tests.
 - Candidate versions: core/utxo unchanged; bitcoin 0.1.0-alpha.3,
   bitcoin-cash/dogecoin/litecoin 0.1.0-alpha.2, evm 0.1.0-alpha.3.
-- Not published.
+- **Published to crates.io on 2026-11-10**:
+  - `shadowallet-chain-bitcoin` 0.1.0-alpha.3
+  - `shadowallet-chain-bitcoin-cash` 0.1.0-alpha.2
+  - `shadowallet-chain-dogecoin` 0.1.0-alpha.2
+  - `shadowallet-chain-litecoin` 0.1.0-alpha.2
+  - `shadowallet-chain-evm` 0.1.0-alpha.3
+- A fresh consumer with no path dependencies or `[patch.crates-io]` resolved
+  only `libsqlite3-sys 0.39.1` (SQLite 3.54.1), no OpenSSL, and ran the
+  BTC/EVM/SQLite smoke checks against the registry artifacts.
 
 ## Unreleased — Phase 5.1 EVM hardening
 

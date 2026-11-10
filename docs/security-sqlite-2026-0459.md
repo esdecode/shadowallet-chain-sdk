@@ -50,5 +50,9 @@ rusqlite 0.41.1 -> libsqlite3-sys 0.39.1 -> bundled SQLite 3.54.1
 
 ## Status
 
-**REMEDIATED in the 0.1.0-alpha.3 candidate set; not yet published.** No
+**REMEDIATED and published.** The fixed versions are on crates.io as of
+2026-11-10 (`shadowallet-chain-bitcoin` 0.1.0-alpha.3,
+`shadowallet-chain-{bitcoin-cash,dogecoin,litecoin}` 0.1.0-alpha.2,
+`shadowallet-chain-evm` 0.1.0-alpha.3). A registry-only consumer resolves
+`libsqlite3-sys 0.39.1` / SQLite 3.54.1 and contains no `rusqlite 0.31`. No
 advisory is ignored or suppressed.

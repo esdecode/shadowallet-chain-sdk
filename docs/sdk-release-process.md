@@ -7,6 +7,9 @@
 5. `cargo package` and `cargo publish --dry-run` succeed for every crate in
    dependency order.
 6. Security review for signing-boundary changes.
-7. Tag `vX.Y.Z` and publish only after explicit maintainer approval.
+7. Tag `vX.Y.Z`, publish in dependency order, and create the GitHub prerelease
+   only after explicit maintainer approval. GitHub Actions are not used for
+   publication or release verification.
 
-No release has been created. Nothing may be published from this working copy.
+Releases are executed from a reviewed local checkout. Record the published
+checksums in the release notes.
