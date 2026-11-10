@@ -15,6 +15,7 @@ No independent security audit has been performed. Do not use with mainnet funds.
 | Dogecoin | xpub / BIP44 P2PKH | yes | yes (verify + finalize) | yes (Dogecoin Core 1.14) | alpha, regtest E2E in app |
 | Bitcoin Cash | xpub / BIP44 P2PKH | yes | yes (BCH ForkID) | yes (BCHN Core) | alpha, BCHN regtest E2E |
 | EVM (ETH/Anvil) | BIP44 m/44'/60'/0'/0/i | yes (EIP-1559) | yes (digest + finalize) | yes (JSON-RPC + SQLite) | alpha, Anvil native/ERC-20 E2E |
+| Solana / SPL *(unreleased, local)* | SLIP-0010 m/44'/501'/n'/0' | yes (legacy message) | restricted in-process signer, localnet only | yes (JSON-RPC, no SQLite) | local validator E2E; see `crates/chain-solana/README.md` |
 
 ## Architecture
 
@@ -29,8 +30,9 @@ shadowallet-chain-evm 0.1.0-alpha.3  chain profiles, BIP44, RPC, ERC-20, EIP-155
 ```
 
 The SDK does **not** include Shadowallet's UWV2 vault, Flutter UI, sessions,
-authorization policy or backend. It stores no private keys and cannot sign by
-itself.
+authorization policy or backend. The published UTXO and EVM crates store no
+private keys and cannot sign by themselves. The unreleased Solana crate is the
+exception: it contains a restricted in-process signer, documented in its README.
 
 ## External signing model
 
