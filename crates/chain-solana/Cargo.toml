@@ -1,0 +1,35 @@
+[package]
+name = "shadowallet-chain-solana"
+version = "0.1.0-alpha.4"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Solana/SPL account derivation, read-only RPC, transaction preparation and restricted external signing."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["solana", "spl", "wallet", "transaction"]
+categories = ["cryptography", "finance"]
+# Not published: Phase 6 work stays local until publication is separately authorized.
+publish = false
+
+[dependencies]
+bs58 = "0.5"
+ed25519-dalek = { version = "2", features = ["zeroize"] }
+curve25519-dalek = "4"
+hmac = "0.12"
+sha2.workspace = true
+base64 = "0.23"
+zeroize = "1"
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bip39 = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

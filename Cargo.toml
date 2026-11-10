@@ -8,6 +8,7 @@ members = [
     "crates/chain-dogecoin",
     "crates/chain-bitcoin-cash",
     "crates/chain-evm",
+    "crates/chain-solana",
 ]
 
 [workspace.package]
