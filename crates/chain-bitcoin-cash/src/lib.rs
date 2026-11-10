@@ -432,7 +432,7 @@ impl BchPublicAccount for BchAccount {
 }
 
 impl BchAccount {
-    pub fn from_seed(network: BchNetwork, seed: &[u8; 32]) -> Result<Self, BchError> {
+    pub fn from_seed(network: BchNetwork, seed: &[u8]) -> Result<Self, BchError> {
         let secp = Secp256k1::new();
         let master =
             Xpriv::new_master(network.network(), seed).map_err(|_| BchError::Derivation)?;
