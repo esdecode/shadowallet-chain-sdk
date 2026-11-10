@@ -2,27 +2,20 @@
 
 //! Full BCH watch-only engine E2E against Bitcoin Cash Node regtest.
 
+mod common;
+
 use std::env;
 use std::path::PathBuf;
 
-use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
+use bdk_bitcoind_rpc::bitcoincore_rpc::RpcApi;
 use serde_json::json;
 use shadowallet_chain_bitcoin_cash::engine::BchEngine;
 use shadowallet_chain_bitcoin_cash::{BchAccount, BchNetwork, finalize_transfer, signing_request};
 
-fn rpc() -> Client {
-    let base = env::var("BCH_RPC_URL").expect("BCH_RPC_URL must point at BCHN regtest");
-    let url = format!("{base}/wallet/uw-bch");
-    let user = env::var("RPC_USER").unwrap_or_else(|_| "uw".to_owned());
-    let pass = env::var("RPC_PASS").unwrap_or_else(|_| "uw".to_owned());
-    Client::new(&url, Auth::UserPass(user, pass)).expect("rpc client")
-}
+const WALLET: &str = "uw-bch";
 
 fn rpc_url() -> String {
-    format!(
-        "{}/wallet/uw-bch",
-        env::var("BCH_RPC_URL").expect("BCH_RPC_URL")
-    )
+    format!("{}/wallet/{WALLET}", common::base_url())
 }
 
 fn temp_db(tag: &str) -> PathBuf {
@@ -35,24 +28,37 @@ fn temp_db(tag: &str) -> PathBuf {
     path
 }
 
-fn mine(rpc: &Client, address: &str, blocks: u64) {
-    rpc.call::<serde_json::Value>("generatetoaddress", &[json!(blocks), json!(address)])
-        .expect("mine");
+/// Each run must use a fresh account. The regtest chain is persistent, so a
+/// fixed seed would rediscover funds left by earlier runs on the same derived
+/// addresses and break the exact-balance assertions.
+fn unique_seed(tag: &str) -> [u8; 32] {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let mut seed = [0u8; 32];
+    for (index, chunk) in seed.chunks_mut(8).enumerate() {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write(tag.as_bytes());
+        hasher.write_usize(index);
+        hasher.write_u32(std::process::id());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        hasher.write_u128(nanos);
+        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
+    }
+    seed
 }
 
 #[test]
 #[ignore = "requires Bitcoin Cash Node regtest"]
 fn bch_engine_end_to_end() {
-    let base = env::var("BCH_RPC_URL").unwrap();
-    let user = env::var("RPC_USER").unwrap_or_else(|_| "uw".to_owned());
-    let pass = env::var("RPC_PASS").unwrap_or_else(|_| "uw".to_owned());
-    let base_rpc = Client::new(&base, Auth::UserPass(user, pass)).expect("base rpc");
-    let _ = base_rpc.call::<serde_json::Value>("createwallet", &[json!("uw-bch")]);
-    let rpc = rpc();
+    let rpc = common::ensure_wallet(WALLET);
     let node_address: String = rpc.call("getnewaddress", &[]).expect("node address");
-    mine(&rpc, &node_address, 101);
+    common::mine(&rpc, &node_address, 101);
 
-    let seed = [0x77u8; 32];
+    let seed = unique_seed("bch-engine");
     let account = BchAccount::from_seed(BchNetwork::Regtest, &seed).expect("account");
     let xpub = account.account_xpub().to_string();
     let db = temp_db("main");
@@ -71,7 +77,7 @@ fn bch_engine_end_to_end() {
     let receive = engine.next_receive_address().expect("receive");
     rpc.call::<String>("sendtoaddress", &[json!(receive.encode()), json!(1.0)])
         .expect("fund");
-    mine(&rpc, &node_address, 1);
+    common::mine(&rpc, &node_address, 1);
 
     let report = engine.sync().expect("sync");
     assert!(report.tip_height >= 102);
@@ -102,7 +108,7 @@ fn bch_engine_end_to_end() {
         .expect("BCHN accept");
     assert_eq!(accepted, signed.compute_txid().to_string());
 
-    mine(&rpc, &node_address, 1);
+    common::mine(&rpc, &node_address, 1);
     engine.sync().expect("resync");
     assert!(engine.balance().confirmed_sats < 100_000_000);
 

@@ -3,17 +3,17 @@
 //! Bitcoin Cash Node regtest acceptance test.
 //!
 //! Run with:
-//!   docker run -d --name uw-bch-regtest -p 18443:18443 \
+//!   docker run -d --name uw-bch-regtest -p 18445:18443 \
 //!     -v "$PWD/infrastructure/docker/bchn.Dockerfile:/tmp/Dockerfile" \
 //!     universal-wallet/bchn-regtest:29.2.0 \
 //!     -regtest=1 -server=1 -txindex=1 -rpcuser=uw -rpcpassword=uw \
 //!     -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -printtoconsole=0
-//!   BCH_RPC_URL=http://127.0.0.1:18443 \
-//!     cargo test -p adapter-bitcoin-cash --test bch_regtest -- --ignored
+//!   BCH_RPC_URL=http://127.0.0.1:18445 RPC_USER=uw RPC_PASS=uw \
+//!     cargo test -p shadowallet-chain-bitcoin-cash --test bch_regtest -- --ignored
 
-use std::env;
+mod common;
 
-use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
+use bdk_bitcoind_rpc::bitcoincore_rpc::RpcApi;
 use serde_json::{Value, json};
 use shadowallet_chain_bitcoin_cash::{
     BchAccount, BchNetwork, Utxo, build_unsigned, sign_transfer, verify_transfer,
@@ -22,22 +22,17 @@ use shadowallet_chain_bitcoin_cash::{
 #[test]
 #[ignore = "requires Bitcoin Cash Node regtest"]
 fn bch_node_accepts_a_locally_signed_transaction() {
-    let url = env::var("BCH_RPC_URL").expect("BCH_RPC_URL must point at BCHN regtest");
-    let user = env::var("RPC_USER").unwrap_or_else(|_| "uw".to_owned());
-    let pass = env::var("RPC_PASS").unwrap_or_else(|_| "uw".to_owned());
-    let rpc = Client::new(&url, Auth::UserPass(user, pass)).expect("rpc client");
+    let rpc = common::ensure_wallet("uw-bch-signing");
 
     let node_address: String = rpc.call("getnewaddress", &[]).expect("node address");
-    rpc.call::<Value>("generatetoaddress", &[json!(101), json!(node_address)])
-        .expect("maturity");
+    common::mine(&rpc, &node_address, 101);
 
     let account = BchAccount::from_seed(BchNetwork::Regtest, &[0x6b; 32]).expect("account");
     let receive = account.address(0, 0).expect("receive address");
     let txid: String = rpc
         .call("sendtoaddress", &[json!(receive.encode()), json!(1.0)])
         .expect("fund");
-    rpc.call::<Value>("generatetoaddress", &[json!(1), json!(node_address)])
-        .expect("mine funding");
+    common::mine(&rpc, &node_address, 1);
 
     let raw: String = rpc
         .call("getrawtransaction", &[json!(txid)])
@@ -75,8 +70,7 @@ fn bch_node_accepts_a_locally_signed_transaction() {
         .expect("BCHN must accept the signed transaction");
     assert_eq!(accepted, signed.compute_txid().to_string());
 
-    rpc.call::<Value>("generatetoaddress", &[json!(1), json!(node_address)])
-        .expect("mine spend");
+    common::mine(&rpc, &node_address, 1);
     let confirmed = rpc
         .call::<Value>("getrawtransaction", &[json!(accepted), json!(1)])
         .expect("confirmed transaction");
