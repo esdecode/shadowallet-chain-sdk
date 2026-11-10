@@ -30,11 +30,10 @@ jobs:
       - run: cargo install cargo-audit cargo-deny --locked
       - run: cargo audit
       - run: cargo deny check licenses advisories bans sources
-        continue-on-error: true
 
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - run: cargo check --workspace
