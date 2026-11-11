@@ -346,7 +346,15 @@ impl DogeEngine {
             if !seen.insert(txid) {
                 continue;
             }
-            let height = entry.get("blockheight").and_then(|v| v.as_u64());
+            // Dogecoin Core's `listtransactions` carries no `blockheight`; derive it from the
+            // confirmation count so a confirmed transaction is never shown as unconfirmed.
+            let height = entry
+                .get("blockheight")
+                .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    let confirmations = entry.get("confirmations").and_then(|v| v.as_u64())?;
+                    (confirmations > 0).then(|| tip.saturating_sub(confirmations) + 1)
+                });
             let tx = match tx_cache.get(&txid) {
                 Some(tx) => tx.clone(),
                 None => match self.raw_transaction(&txid) {
