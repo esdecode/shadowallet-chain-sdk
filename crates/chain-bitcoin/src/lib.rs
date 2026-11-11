@@ -415,6 +415,30 @@ impl BitcoinEngine {
         fee_rate_sat_vb: u64,
         send_max: bool,
     ) -> Result<TransferPlan, BitcoinError> {
+        self.build_transfer_excluding(destination, amount_sats, fee_rate_sat_vb, send_max, &[])
+    }
+
+    /// Like [`build_transfer`](Self::build_transfer) but never selects the
+    /// given outpoints (`txid`, `vout`), so a caller that holds reservations
+    /// can let coin selection work from the remaining coins. An outpoint that
+    /// is not a valid txid is rejected rather than ignored.
+    pub fn build_transfer_excluding(
+        &mut self,
+        destination: &str,
+        amount_sats: u64,
+        fee_rate_sat_vb: u64,
+        send_max: bool,
+        exclude: &[(String, u32)],
+    ) -> Result<TransferPlan, BitcoinError> {
+        use std::str::FromStr;
+        let unspendable = exclude
+            .iter()
+            .map(|(txid, vout)| {
+                bdk_wallet::bitcoin::Txid::from_str(txid)
+                    .map(|txid| bdk_wallet::bitcoin::OutPoint::new(txid, *vout))
+                    .map_err(|e| BitcoinError::Engine(format!("bad excluded outpoint: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if self.descriptors.network.is_mainnet() {
             return Err(BitcoinError::MainnetDisabled);
         }
@@ -422,6 +446,7 @@ impl BitcoinEngine {
         let fee_rate =
             FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(BitcoinError::Unsupported)?;
         let mut builder = self.wallet.build_tx();
+        builder.unspendable(unspendable);
         if send_max {
             builder.drain_wallet().drain_to(address.script_pubkey());
         } else {
