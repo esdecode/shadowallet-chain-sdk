@@ -350,11 +350,16 @@ impl BchEngine {
             let height = entry.get("blockheight").and_then(|v| v.as_u64());
             let tx = match tx_cache.get(&txid) {
                 Some(tx) => tx.clone(),
-                None => {
-                    let tx = self.raw_transaction(&txid)?;
-                    tx_cache.insert(txid, tx.clone());
-                    tx
-                }
+                None => match self.raw_transaction(&txid) {
+                    Ok(tx) => {
+                        tx_cache.insert(txid, tx.clone());
+                        tx
+                    }
+                    // Listed by the node wallet but no longer known to the node: it was
+                    // replaced or evicted from the mempool. Such a transaction is not
+                    // history, and it must never make the whole synchronisation fail.
+                    Err(_) => continue,
+                },
             };
             let received: u64 = tx
                 .output
