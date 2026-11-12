@@ -433,10 +433,23 @@ impl BchPublicAccount for BchAccount {
 
 impl BchAccount {
     pub fn from_seed(network: BchNetwork, seed: &[u8]) -> Result<Self, BchError> {
+        Self::from_seed_account(network, seed, 0)
+    }
+
+    /// Derive account `account` (`m/44'/145'/account'`). The index is hardened and bounded.
+    pub fn from_seed_account(
+        network: BchNetwork,
+        seed: &[u8],
+        account: u32,
+    ) -> Result<Self, BchError> {
+        if account >= 0x8000_0000 {
+            return Err(BchError::Derivation);
+        }
         let secp = Secp256k1::new();
         let master =
             Xpriv::new_master(network.network(), seed).map_err(|_| BchError::Derivation)?;
-        let path = DerivationPath::from_str("m/44'/145'/0'").map_err(|_| BchError::Derivation)?;
+        let path = DerivationPath::from_str(&format!("m/44'/145'/{account}'"))
+            .map_err(|_| BchError::Derivation)?;
         let account = master
             .derive_priv(&secp, &path)
             .map_err(|_| BchError::Derivation)?;
