@@ -201,6 +201,15 @@ impl DogeEngine {
         self.indexer().is_some()
     }
 
+    /// Prove both services of the indexer backend are the Dogecoin testnet and agree on a recent block
+    /// (memoised). A node backend is verified separately by its caller; this is then a no-op.
+    pub fn verify_backend_identity(&self) -> Result<(), DogecoinSdkError> {
+        match self.indexer() {
+            Some(ix) => ix.ensure_identity(),
+            None => Ok(()),
+        }
+    }
+
     pub fn network(&self) -> DogeNetwork {
         self.account.network
     }
