@@ -242,10 +242,28 @@ impl LtcEngine {
     }
 
     fn raw_transaction(&self, txid: &Txid) -> Result<Transaction, LitecoinSdkError> {
-        let hex: String = self
+        // `getrawtransaction` only finds confirmed transactions on a node with `-txindex`; a pruned
+        // node (every public test network here) has none. The node wallet knows every transaction
+        // that pays one of our imported addresses, so fall back to `gettransaction` (its `hex`).
+        let hex: String = match self
             .rpc
-            .call("getrawtransaction", &[serde_json::json!(txid.to_string())])
-            .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+            .call::<String>("getrawtransaction", &[serde_json::json!(txid.to_string())])
+        {
+            Ok(hex) => hex,
+            Err(_) => {
+                let wallet_tx: serde_json::Value = self
+                    .rpc
+                    .call("gettransaction", &[serde_json::json!(txid.to_string())])
+                    .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+                wallet_tx
+                    .get("hex")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        LitecoinSdkError::Transaction("transaction hex unavailable".to_owned())
+                    })?
+            }
+        };
         deserialize_hex(&hex).map_err(|e| LitecoinSdkError::Transaction(e.to_string()))
     }
 
