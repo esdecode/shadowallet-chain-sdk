@@ -146,14 +146,18 @@ impl BitcoinEngine {
     /// Full/incremental scan through Esplora. The endpoint is untrusted input:
     /// it can supply chain data, never authorization.
     pub fn sync_esplora(&mut self, url: &str) -> Result<SyncReport, BitcoinError> {
-        let client = bdk_esplora::esplora_client::Builder::new(url)
-            .build_async()
-            .map_err(|e| BitcoinError::Network(e.to_string()))?;
-        let request = self.wallet.start_full_scan();
-        let update = block_on(bdk_esplora::EsploraAsyncExt::full_scan(
-            &client, request, 20, 1,
-        ))
-        .map_err(|e| BitcoinError::Network(e.to_string()))?;
+        // Read-only: a public server may reset a pooled connection or rate-limit, so the scan is
+        // retried a bounded number of times, each time with a fresh client and a fresh request.
+        let update = retry_read(|| {
+            let client = bdk_esplora::esplora_client::Builder::new(url)
+                .build_async()
+                .map_err(|e| BitcoinError::Network(e.to_string()))?;
+            let request = self.wallet.start_full_scan();
+            block_on(bdk_esplora::EsploraAsyncExt::full_scan(
+                &client, request, 20, 1,
+            ))
+            .map_err(|e| BitcoinError::Network(e.to_string()))
+        })?;
         let before = self.wallet.transactions().count();
         self.wallet
             .apply_update(update)
@@ -521,6 +525,27 @@ impl BitcoinEngine {
     }
 }
 
+/// Bounded retry for READ-ONLY requests to a public server (stale pooled connection, rate limit,
+/// transient 5xx). Up to four attempts with 0.5 s, 1 s and 2 s pauses. Never used for a broadcast:
+/// retrying a submission after an unclear outcome could duplicate it.
+fn retry_read<T>(mut attempt: impl FnMut() -> Result<T, BitcoinError>) -> Result<T, BitcoinError> {
+    let mut pause = std::time::Duration::from_millis(500);
+    let mut last = None;
+    for n in 0..4 {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last = Some(error);
+                if n < 3 {
+                    std::thread::sleep(pause);
+                    pause *= 2;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| BitcoinError::Network("no attempt was made".to_owned())))
+}
+
 #[allow(clippy::expect_used)] // runtime creation failure is fatal and not recoverable
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -601,11 +626,12 @@ impl BitcoinEngine {
 
     /// Live fee estimates from Esplora (`/fee-estimates`, sat/vB by target).
     pub fn estimate_fees_esplora(url: &str) -> Result<FeeEstimates, BitcoinError> {
-        let client = bdk_esplora::esplora_client::Builder::new(url)
-            .build_async()
-            .map_err(|e| BitcoinError::Network(e.to_string()))?;
-        let estimates = block_on(client.get_fee_estimates())
-            .map_err(|e| BitcoinError::Network(e.to_string()))?;
+        let estimates = retry_read(|| {
+            let client = bdk_esplora::esplora_client::Builder::new(url)
+                .build_async()
+                .map_err(|e| BitcoinError::Network(e.to_string()))?;
+            block_on(client.get_fee_estimates()).map_err(|e| BitcoinError::Network(e.to_string()))
+        })?;
         let pick = |target: u16| -> Result<u64, BitcoinError> {
             // Use the estimate for the closest target at or above the requested
             // confirmation target; fall back to the highest available.
