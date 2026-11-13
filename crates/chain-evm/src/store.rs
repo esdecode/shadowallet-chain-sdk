@@ -464,6 +464,53 @@ impl EvmStore {
         Ok(())
     }
 
+    /// The node answered an explicit, definitive rejection of a signed transaction: it is not in the
+    /// node's pool. Settle the row as `failed`, drop the hash and raw bytes (so an identical retry,
+    /// which signs to the very same hash, does not collide with the unique hash index) and recompute
+    /// the next nonce from the rows that are still active, so the nonce is reusable. Only valid for
+    /// rows that were never confirmed `pending`; an ambiguous outcome must use
+    /// [`Self::mark_broadcast_unknown`] instead.
+    pub fn mark_rejected(&self, id: i64, error: &str) -> Result<(), EvmError> {
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store_err)?;
+        let row: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT chain_id, address FROM evm_tx WHERE id = ?1 AND status IN ('reserved','signed')",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let Some((chain_id, address)) = row else {
+            return Err(EvmError::NonceConflict);
+        };
+        tx.execute(
+            "UPDATE evm_tx SET status = 'failed', error = ?2, tx_hash = NULL, raw_tx = NULL, updated_at = ?3
+             WHERE id = ?1",
+            params![id, error, now()],
+        )
+        .map_err(store_err)?;
+        let active_max: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(nonce) FROM evm_tx
+                 WHERE chain_id = ?1 AND address = ?2
+                   AND status IN ('reserved','signed','pending','broadcast_unknown')",
+                params![chain_id, address],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .map_err(store_err)?;
+        tx.execute(
+            "UPDATE evm_nonce SET next_nonce = ?3, updated_at = ?4
+             WHERE chain_id = ?1 AND address = ?2",
+            params![chain_id, address, active_max.map_or(0, |n| n + 1), now()],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(())
+    }
+
     pub fn mark_receipt(&self, id: i64, block_number: u64, success: bool) -> Result<(), EvmError> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let status = if success { "confirmed" } else { "reverted" };

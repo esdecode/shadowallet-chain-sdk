@@ -242,3 +242,40 @@ fn token_metadata_and_sync_checkpoint_roundtrip() {
         Some(80)
     );
 }
+
+#[test]
+fn definitive_rejection_frees_the_nonce_and_the_hash() {
+    let store = EvmStore::open_in_memory().unwrap();
+    store.register_account(ANVIL.chain_id, ADDR).unwrap();
+    let tx = store
+        .reserve_nonce(ANVIL.chain_id, ADDR, 0, &draft())
+        .unwrap();
+    store.mark_signed(tx.id, "0xabc", "0x01").unwrap();
+    store.mark_rejected(tx.id, "insufficient funds").unwrap();
+    assert_eq!(store.next_nonce(ANVIL.chain_id, ADDR).unwrap(), Some(0));
+    // The identical retry signs to the same hash: it must not collide with the failed row.
+    let again = store
+        .reserve_nonce(ANVIL.chain_id, ADDR, 0, &draft())
+        .unwrap();
+    assert_eq!(again.nonce, 0);
+    store.mark_signed(again.id, "0xabc", "0x01").unwrap();
+    // A pending (accepted) row can never be rejected away.
+    store.mark_broadcast(again.id, "0xabc", "0x01").unwrap();
+    assert!(store.mark_rejected(again.id, "late").is_err());
+}
+
+#[test]
+fn rejection_keeps_the_nonce_when_a_later_row_is_active() {
+    let store = EvmStore::open_in_memory().unwrap();
+    store.register_account(ANVIL.chain_id, ADDR).unwrap();
+    let first = store
+        .reserve_nonce(ANVIL.chain_id, ADDR, 0, &draft())
+        .unwrap();
+    let second = store
+        .reserve_nonce(ANVIL.chain_id, ADDR, 0, &draft())
+        .unwrap();
+    assert_eq!((first.nonce, second.nonce), (0, 1));
+    store.mark_signed(first.id, "0x01", "0x01").unwrap();
+    store.mark_rejected(first.id, "rejected").unwrap();
+    assert_eq!(store.next_nonce(ANVIL.chain_id, ADDR).unwrap(), Some(2));
+}
