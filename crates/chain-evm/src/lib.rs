@@ -623,6 +623,14 @@ fn append_to(stream: &mut rlp::RlpStream, to: TxKind) {
     }
 }
 
+/// RLP encodes integers as big-endian scalars WITHOUT leading zero bytes. A signature component
+/// whose first byte is zero (about 1 in 128 of `r` or `s`) must therefore be trimmed, otherwise
+/// nodes reject the transaction as undecodable.
+fn trim_leading_zeros(bytes: &[u8]) -> &[u8] {
+    let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+    &bytes[first..]
+}
+
 fn signature_rs(signature: &[u8]) -> Result<([u8; 32], [u8; 32], u8), EvmError> {
     if signature.len() != 65 {
         return Err(EvmError::Transaction(
@@ -672,8 +680,8 @@ impl UnsignedEvmTransaction {
         stream.begin_list(0); // access list
         if let Some((r, s, parity)) = signed {
             append_u64(&mut stream, u64::from(parity));
-            stream.append(&&r[..]);
-            stream.append(&&s[..]);
+            stream.append(&trim_leading_zeros(&r));
+            stream.append(&trim_leading_zeros(&s));
         }
         let body = stream.out().to_vec();
         let mut out = Vec::with_capacity(body.len() + 1);
@@ -702,8 +710,8 @@ impl UnsignedEvmTransaction {
                     .ok_or(EvmError::Transaction("legacy v overflow".to_owned()))
                     .unwrap_or(0);
                 append_u64(&mut stream, v);
-                stream.append(&&r[..]);
-                stream.append(&&s[..]);
+                stream.append(&trim_leading_zeros(&r));
+                stream.append(&trim_leading_zeros(&s));
             }
             None => {
                 append_u64(&mut stream, self.chain_id);
@@ -1052,5 +1060,48 @@ mod tests {
         assert_eq!(a.address, b.address);
         let c = EvmAccount::from_seed(ANVIL, &[0x42; 64], 1).unwrap();
         assert_ne!(a.address, c.address);
+    }
+
+    /// Regression: a signature whose `r` or `s` starts with a zero byte must be RLP-encoded as a
+    /// scalar without that byte; a fixed 32-byte string makes nodes answer "Failed to decode".
+    #[test]
+    fn signature_components_with_leading_zeros_are_encoded_as_scalars() {
+        for tx_type in [EvmTxType::Eip1559, EvmTxType::Legacy] {
+            let unsigned = UnsignedEvmTransaction {
+                chain_id: 31_337,
+                nonce: 3,
+                to: TxKind::Call(Address::from([0x42; 20])),
+                value: U256::from(1_000u64),
+                input: Bytes::new(),
+                gas_limit: 21_000,
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000_000,
+                gas_price: Some(2_000_000_000),
+                tx_type,
+            };
+            // r = 0x0000..01 (31 leading zero bytes), s = 0x00ab..: both valid, low-S.
+            let mut sig = [0u8; 65];
+            sig[31] = 0x01;
+            sig[33] = 0xab;
+            sig[63] = 0x01;
+            sig[64] = 0;
+            let raw = unsigned.finalize(&sig).unwrap();
+            let body = if tx_type == EvmTxType::Eip1559 {
+                &raw[1..]
+            } else {
+                &raw[..]
+            };
+            let list = rlp::Rlp::new(body);
+            let items = list.item_count().unwrap();
+            let r: Vec<u8> = list.at(items - 2).unwrap().data().unwrap().to_vec();
+            let s: Vec<u8> = list.at(items - 1).unwrap().data().unwrap().to_vec();
+            assert_eq!(r, vec![0x01], "{tx_type:?}: r must be a scalar");
+            assert_eq!(s.len(), 31, "{tx_type:?}: s must be 31 bytes, 0xab first");
+            assert_ne!(
+                s.first(),
+                Some(&0),
+                "{tx_type:?}: s must not start with zero"
+            );
+        }
     }
 }
