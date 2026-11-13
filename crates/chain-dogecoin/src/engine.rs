@@ -16,6 +16,7 @@ use rusqlite::{Connection as Sqlite, params};
 use serde::{Deserialize, Serialize};
 use shadowallet_chain_utxo::{FeeEstimate, Utxo, UtxoBalance, UtxoHistoryEntry};
 
+use crate::indexer::{Indexer, IndexerConfig};
 use crate::{DogeAccount, DogeNetwork, DogecoinSdkError, UnsignedTransfer, prepare_transfer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,9 +44,16 @@ struct Persisted {
     history: Vec<UtxoHistoryEntry>,
 }
 
+/// Where chain data comes from: a Dogecoin Core node with a wallet, or (testnet only) the two public
+/// untrusted services of [`crate::indexer`].
+enum Backend {
+    Node(Client),
+    Indexer(Box<Indexer>),
+}
+
 pub struct DogeEngine {
     account: DogeAccount,
-    rpc: Client,
+    backend: Backend,
     db: Sqlite,
     addresses: Vec<(u32, u32, Address, ScriptBuf)>,
     utxos: Vec<DogeUtxo>,
@@ -82,12 +90,55 @@ impl DogeEngine {
         db_path: &Path,
         lookahead: u32,
     ) -> Result<Self, DogecoinSdkError> {
-        let account = DogeAccount::from_xpub(network, xpub, fingerprint)?;
         let rpc = Client::new(
             rpc_url,
             Auth::UserPass(rpc_user.to_owned(), rpc_password.to_owned()),
         )
         .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
+        Self::open_with(
+            network,
+            xpub,
+            fingerprint,
+            Backend::Node(rpc),
+            db_path,
+            lookahead,
+        )
+    }
+
+    /// Open on the public-testnet indexer backend. Only the Dogecoin testnet may use it: the genesis
+    /// identity of both services is verified before the first read and signing never depends on it.
+    pub fn open_indexer(
+        network: DogeNetwork,
+        xpub: &str,
+        fingerprint: [u8; 4],
+        config: IndexerConfig,
+        db_path: &Path,
+    ) -> Result<Self, DogecoinSdkError> {
+        if network != DogeNetwork::Testnet {
+            return Err(DogecoinSdkError::Transaction(
+                "the public indexer backend is for the Dogecoin testnet only".to_owned(),
+            ));
+        }
+        let indexer = Indexer::new(config)?;
+        Self::open_with(
+            network,
+            xpub,
+            fingerprint,
+            Backend::Indexer(Box::new(indexer)),
+            db_path,
+            5,
+        )
+    }
+
+    fn open_with(
+        network: DogeNetwork,
+        xpub: &str,
+        fingerprint: [u8; 4],
+        backend: Backend,
+        db_path: &Path,
+        lookahead: u32,
+    ) -> Result<Self, DogecoinSdkError> {
+        let account = DogeAccount::from_xpub(network, xpub, fingerprint)?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
@@ -107,9 +158,10 @@ impl DogeEngine {
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);")
             .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
+        let indexed = matches!(backend, Backend::Indexer(_));
         let mut engine = Self {
             account,
-            rpc,
+            backend,
             db,
             addresses: Vec::new(),
             utxos: Vec::new(),
@@ -118,9 +170,35 @@ impl DogeEngine {
             change_index: 0,
         };
         engine.load_meta()?;
+        // The indexer is queried address by address, so scan only what has been handed out (+ a gap).
+        let lookahead = if indexed {
+            lookahead.max(engine.external_index.saturating_add(3))
+        } else {
+            lookahead
+        };
         engine.build_addresses(lookahead)?;
         engine.import_addresses()?;
         Ok(engine)
+    }
+
+    fn node(&self) -> Result<&Client, DogecoinSdkError> {
+        match &self.backend {
+            Backend::Node(rpc) => Ok(rpc),
+            Backend::Indexer(_) => Err(DogecoinSdkError::Transaction(
+                "operation needs a node backend".to_owned(),
+            )),
+        }
+    }
+
+    fn indexer(&self) -> Option<&Indexer> {
+        match &self.backend {
+            Backend::Indexer(i) => Some(i),
+            Backend::Node(_) => None,
+        }
+    }
+
+    pub fn uses_indexer(&self) -> bool {
+        self.indexer().is_some()
     }
 
     pub fn network(&self) -> DogeNetwork {
@@ -204,9 +282,11 @@ impl DogeEngine {
     }
 
     fn import_addresses(&self) -> Result<(), DogecoinSdkError> {
+        let Backend::Node(rpc) = &self.backend else {
+            return Ok(());
+        };
         for (_, _, address, _) in &self.addresses {
-            let _: serde_json::Value = self
-                .rpc
+            let _: serde_json::Value = rpc
                 .call(
                     "importaddress",
                     &[
@@ -221,8 +301,10 @@ impl DogeEngine {
     }
 
     fn import_address(&self, address: &Address) -> Result<(), DogecoinSdkError> {
-        let _: serde_json::Value = self
-            .rpc
+        let Backend::Node(rpc) = &self.backend else {
+            return Ok(());
+        };
+        let _: serde_json::Value = rpc
             .call(
                 "importaddress",
                 &[
@@ -246,31 +328,72 @@ impl DogeEngine {
         // `getrawtransaction` only finds confirmed transactions on a node with `-txindex`; a pruned
         // node (every public test network here) has none. The node wallet knows every transaction
         // that pays one of our imported addresses, so fall back to `gettransaction` (its `hex`).
-        let hex: String = match self
-            .rpc
-            .call::<String>("getrawtransaction", &[serde_json::json!(txid.to_string())])
-        {
-            Ok(hex) => hex,
-            Err(_) => {
-                let wallet_tx: serde_json::Value = self
-                    .rpc
-                    .call("gettransaction", &[serde_json::json!(txid.to_string())])
-                    .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
-                wallet_tx
-                    .get("hex")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        DogecoinSdkError::Transaction("transaction hex unavailable".to_owned())
-                    })?
-            }
-        };
+        let rpc = self.node()?;
+        let hex: String =
+            match rpc.call::<String>("getrawtransaction", &[serde_json::json!(txid.to_string())]) {
+                Ok(hex) => hex,
+                Err(_) => {
+                    let wallet_tx: serde_json::Value = rpc
+                        .call("gettransaction", &[serde_json::json!(txid.to_string())])
+                        .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
+                    wallet_tx
+                        .get("hex")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            DogecoinSdkError::Transaction("transaction hex unavailable".to_owned())
+                        })?
+                }
+            };
         deserialize_hex(&hex).map_err(|e| DogecoinSdkError::Transaction(e.to_string()))
     }
 
+    /// Synchronise from the two public services: every spendable UTXO is validated against its own raw
+    /// transaction and confirmed by the second service before it is accepted.
+    fn sync_indexer(&mut self) -> Result<DogeSyncReport, DogecoinSdkError> {
+        let Some(ix) = self.indexer() else {
+            return Err(DogecoinSdkError::Transaction("no indexer".to_owned()));
+        };
+        ix.ensure_identity()?;
+        let (tip, _) = ix.tip()?;
+        let scan: Vec<(String, ScriptBuf)> = self
+            .addresses
+            .iter()
+            .map(|(_, _, a, spk)| (a.to_string(), spk.clone()))
+            .collect();
+        let verified = ix.verified_utxos(&scan, tip)?;
+        let names: Vec<String> = scan.iter().map(|(a, _)| a.clone()).collect();
+        let history = ix.history(&names, tip)?;
+        let mut utxos = Vec::new();
+        for (i, u) in verified {
+            let (keychain, index, _, _) = &self.addresses[i];
+            utxos.push(DogeUtxo {
+                outpoint: OutPoint {
+                    txid: u.txid,
+                    vout: u.vout,
+                },
+                value_sats: u.value_sats,
+                confirmations: u.confirmations,
+                keychain: *keychain,
+                index: *index,
+            });
+        }
+        self.utxos = utxos;
+        self.history = history;
+        self.persist()?;
+        Ok(DogeSyncReport {
+            tip_height: tip,
+            utxos: self.utxos.len(),
+            history: self.history.len(),
+        })
+    }
+
     pub fn sync(&mut self) -> Result<DogeSyncReport, DogecoinSdkError> {
+        if self.uses_indexer() {
+            return self.sync_indexer();
+        }
         let tip = self
-            .rpc
+            .node()?
             .get_block_count()
             .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))?;
         let addresses: Vec<String> = self
@@ -279,7 +402,7 @@ impl DogeEngine {
             .map(|(_, _, a, _)| a.to_string())
             .collect();
         let unspent: Vec<serde_json::Value> = self
-            .rpc
+            .node()?
             .call(
                 "listunspent",
                 &[
@@ -339,7 +462,7 @@ impl DogeEngine {
         self.utxos = utxos;
 
         let listed: Vec<serde_json::Value> = self
-            .rpc
+            .node()?
             .call(
                 "listtransactions",
                 &[
@@ -479,9 +602,25 @@ impl DogeEngine {
     }
 
     pub fn fee_estimates(&self) -> FeeEstimate {
+        if let Some(ix) = self.indexer() {
+            let (rate, source) = ix.fee_rate();
+            return FeeEstimate {
+                economy_sat_vb: rate,
+                normal_sat_vb: rate,
+                priority_sat_vb: rate,
+                source: source.to_owned(),
+            };
+        }
+        let Ok(rpc) = self.node() else {
+            return FeeEstimate {
+                economy_sat_vb: 1,
+                normal_sat_vb: 1,
+                priority_sat_vb: 1,
+                source: "policy-floor".to_owned(),
+            };
+        };
         let target = |blocks: u64| -> Option<u64> {
-            let value: serde_json::Value = self
-                .rpc
+            let value: serde_json::Value = rpc
                 .call("estimatesmartfee", &[serde_json::json!(blocks)])
                 .ok()?;
             value
@@ -500,8 +639,7 @@ impl DogeEngine {
                 source: "estimatesmartfee".to_owned(),
             };
         }
-        let flat: Option<u64> = self
-            .rpc
+        let flat: Option<u64> = rpc
             .call::<serde_json::Value>("estimatefee", &[])
             .ok()
             .and_then(|v| v.as_f64())
@@ -514,8 +652,7 @@ impl DogeEngine {
                 source: "estimatefee".to_owned(),
             };
         }
-        let relay = self
-            .rpc
+        let relay = rpc
             .call::<serde_json::Value>("getnetworkinfo", &[])
             .ok()
             .and_then(|v| v.get("relayfee").and_then(|r| r.as_f64()))
@@ -537,14 +674,26 @@ impl DogeEngine {
     }
 
     pub fn broadcast_hex(&self, hex: &str) -> Result<String, DogecoinSdkError> {
-        self.rpc
+        if let Some(ix) = self.indexer() {
+            // Exactly one attempt; an uncertain outcome is reported as such and never retried.
+            return ix.broadcast(hex);
+        }
+        self.node()?
             .call("sendrawtransaction", &[serde_json::json!(hex)])
             .map_err(|e| DogecoinSdkError::Transaction(e.to_string()))
     }
 
     pub fn transaction_status(&self, txid: &str) -> Result<serde_json::Value, DogecoinSdkError> {
+        if let Some(ix) = self.indexer() {
+            let (status, block_hash) = ix.transaction_status(txid)?;
+            return Ok(serde_json::json!({
+                "txid": txid,
+                "confirmations": status.confirmations,
+                "blockhash": block_hash,
+            }));
+        }
         let tx: serde_json::Value = self
-            .rpc
+            .node()?
             .call(
                 "gettransaction",
                 &[serde_json::json!(txid), serde_json::json!(true)],
@@ -557,10 +706,53 @@ impl DogeEngine {
         }))
     }
 
+    /// Settlement evidence straight from the node (second service in indexer mode): is the outpoint
+    /// still unspent, mempool included? `Err` is no evidence.
+    pub fn input_unspent_at_node(&self, txid: &str, vout: u32) -> Result<bool, DogecoinSdkError> {
+        if let Some(ix) = self.indexer() {
+            return ix.input_unspent(txid, vout);
+        }
+        let answer: serde_json::Value = self
+            .node()?
+            .call(
+                "gettxout",
+                &[
+                    serde_json::json!(txid),
+                    serde_json::json!(vout),
+                    serde_json::json!(true),
+                ],
+            )
+            .map_err(|e| DogecoinSdkError::Transaction(format!("node: {e}")))?;
+        Ok(!answer.is_null())
+    }
+
+    /// Is the transaction in the node's mempool right now? `Err` is no evidence.
+    pub fn in_mempool(&self, txid: &str) -> Result<bool, DogecoinSdkError> {
+        if let Some(ix) = self.indexer() {
+            return ix.in_mempool(txid);
+        }
+        let answer: Result<serde_json::Value, _> = self
+            .node()?
+            .call("getmempoolentry", &[serde_json::json!(txid)]);
+        match answer {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let m = e.to_string();
+                if m.contains("-5") && m.to_ascii_lowercase().contains("not in mempool") {
+                    Ok(false)
+                } else {
+                    Err(DogecoinSdkError::Transaction(format!("node: {m}")))
+                }
+            }
+        }
+    }
+
     pub fn rescan(&self) -> Result<(), DogecoinSdkError> {
+        let Backend::Node(rpc) = &self.backend else {
+            return Ok(()); // the indexer always answers from the chain; there is nothing to rescan
+        };
         for (_, _, address, _) in &self.addresses {
-            let _: serde_json::Value = self
-                .rpc
+            let _: serde_json::Value = rpc
                 .call(
                     "importaddress",
                     &[

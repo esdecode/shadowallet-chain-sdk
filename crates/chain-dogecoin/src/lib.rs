@@ -4,6 +4,7 @@
 //! externally produced ECDSA signatures. No seed or private key is stored.
 
 pub mod engine;
+pub mod indexer;
 
 use std::str::FromStr;
 
