@@ -49,8 +49,29 @@ impl SolanaNetwork {
         self == Self::MainnetBeta
     }
 
-    /// Phase 6 policy: only the disposable local validator may sign.
+    /// Signing policy: the disposable local validator and the public Devnet (worthless test SOL)
+    /// may sign. Testnet and mainnet-beta never do. The cluster identity is verified by genesis
+    /// hash before any transaction is prepared (see `SolanaRpc::verify_network`).
     pub fn signing_enabled(self) -> bool {
-        self == Self::Localnet
+        matches!(self, Self::Localnet | Self::Devnet)
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::SolanaNetwork;
+
+    #[test]
+    fn only_localnet_and_devnet_sign() {
+        let signing: Vec<_> = SolanaNetwork::ALL
+            .iter()
+            .filter(|n| n.signing_enabled())
+            .collect();
+        assert_eq!(
+            signing,
+            vec![&SolanaNetwork::Localnet, &SolanaNetwork::Devnet]
+        );
+        assert!(!SolanaNetwork::MainnetBeta.signing_enabled());
+        assert!(!SolanaNetwork::Testnet.signing_enabled());
     }
 }
