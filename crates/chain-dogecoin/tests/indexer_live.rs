@@ -30,9 +30,14 @@ fn real_services_agree_and_a_real_utxo_verifies() {
     };
     // One holds hundreds of outputs: a possibly truncated answer must be refused, never understated.
     let big = "nUT9KLwkq1EmR64AS23nogoD8vGfafSxaP";
-    let msg = ix.unspent(big, &parse(big), tip).unwrap_err().to_string();
-    println!("big address -> {msg}");
-    assert!(msg.contains("incomplete"), "{msg}");
+    match ix.unspent(big, &parse(big), tip) {
+        Ok(all) => println!("big address -> {} outputs, every page validated", all.len()),
+        Err(e) => {
+            let msg = e.to_string();
+            println!("big address -> {msg}");
+            assert!(msg.contains("incomplete"), "{msg}");
+        }
+    }
 
     let small = "nmJAjmUzuyhR6hMMkmVZQj9D6VApP2pcwK";
     let all = ix

@@ -37,9 +37,9 @@ const CROSS_CHECK_DEPTH: u64 = 12;
 pub const MAX_VERIFIED_UTXOS: usize = 10;
 /// Coinbase outputs need this many confirmations before they may be spent.
 const COINBASE_MATURITY: u32 = 240;
-/// The indexer's UTXO page size, and how many pages one address may use (50 outputs).
+/// The indexer's UTXO page size, and how many pages one address may use (400 outputs).
 const UTXO_PAGE_SIZE: usize = 10;
-const MAX_UTXO_PAGES: u32 = 5;
+const MAX_UTXO_PAGES: u32 = 40;
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const FEE_CACHE: Duration = Duration::from_secs(600);
 /// Hard ceiling on a believable fee rate (DOGE per kB). Anything above is treated as a bad answer.
