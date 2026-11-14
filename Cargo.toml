@@ -11,6 +11,7 @@ members = [
     "crates/chain-solana",
     "crates/chain-tron",
     "crates/chain-monero",
+    "vendor/monero-ed25519",
 ]
 
 [workspace.package]
@@ -53,3 +54,7 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 
+# monero-ed25519 0.1.0 pulls crypto-bigint 0.5.5 (RUSTSEC-2026-0387). The vendored copy is identical except for
+# Point::biased_hash, ported to crypto-bigint 0.7 and checked against 4000 vectors of the original.
+[patch.crates-io]
+monero-ed25519 = { path = "vendor/monero-ed25519" }
