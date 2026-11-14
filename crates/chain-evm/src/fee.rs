@@ -1,8 +1,7 @@
 //! EIP-1559 fee quoting with explicit confidence status.
 //!
-//! L2 chains add an L1 data-fee component that this SDK cannot compute
-//! reliably yet. Their quotes are returned with `total_confident = false`
-//! and transaction preparation refuses to sign them.
+//! L2 chains add an L1 data-fee component. Arbitrum folds it into the gas estimate (a margin is added here); on the
+//! OP stack it is read from the `GasPriceOracle` predeploy when the transaction is prepared (`with_l1_fee` in lib.rs).
 
 use crate::U256;
 
@@ -44,7 +43,18 @@ pub async fn select_fees(provider: &EvmProvider, gas_limit: u64) -> Result<Selec
                 tx_type: EvmTxType::Legacy,
             })
         }
-        FeeModel::Eip1559 => {
+        FeeModel::Eip1559 | FeeModel::OpStack | FeeModel::ArbitrumNitro => {
+            // Arbitrum: the node's estimate already contains the L1 data cost as gas, but the L1 base fee can move
+            // before inclusion, so keep a 25 % margin (a transaction that runs out of gas still pays for it).
+            let gas_limit = if provider.chain.fee_model == FeeModel::ArbitrumNitro {
+                let padded = gas_limit.saturating_add(gas_limit / 4);
+                if padded > MAX_GAS_LIMIT {
+                    return Err(EvmError::FeeRejected);
+                }
+                padded
+            } else {
+                gas_limit
+            };
             let quote = quote_fees(provider, gas_limit).await?;
             if !quote.total_confident {
                 return Err(EvmError::UnsupportedFeeModel);
@@ -58,7 +68,6 @@ pub async fn select_fees(provider: &EvmProvider, gas_limit: u64) -> Result<Selec
                 tx_type: EvmTxType::Eip1559,
             })
         }
-        FeeModel::Eip1559WithL1DataFee => Err(EvmError::UnsupportedFeeModel),
     }
 }
 
@@ -124,6 +133,6 @@ pub async fn quote_fees(provider: &EvmProvider, gas_limit: u64) -> Result<FeeQuo
         gas_limit,
         max_gas_cost_wei: max_gas_cost,
         l1_data_fee_wei: None,
-        total_confident: provider.chain.fee_model == FeeModel::Eip1559,
+        total_confident: provider.chain.fee_model != FeeModel::Legacy,
     })
 }

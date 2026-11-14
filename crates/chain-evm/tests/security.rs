@@ -15,6 +15,7 @@ fn base() -> UnsignedEvmTransaction {
         max_priority_fee_per_gas: 1_000_000,
         gas_price: None,
         tx_type: shadowallet_chain_evm::EvmTxType::Eip1559,
+        l1_data_fee_wei: Default::default(),
     }
 }
 
@@ -147,6 +148,7 @@ fn matches_independent_legacy_eip155_vector() {
         max_priority_fee_per_gas: 0,
         gas_price: Some(20_000_000_000),
         tx_type: EvmTxType::Legacy,
+        l1_data_fee_wei: Default::default(),
     };
     let signature = account
         .sign_digest(tx.signature_hash().as_bytes().try_into().unwrap())
@@ -175,6 +177,7 @@ fn matches_independent_eip1559_vector() {
         max_priority_fee_per_gas: 1_000_000_000,
         gas_price: None,
         tx_type: EvmTxType::Eip1559,
+        l1_data_fee_wei: Default::default(),
     };
     let signature = account
         .sign_digest(tx.signature_hash().as_bytes().try_into().unwrap())

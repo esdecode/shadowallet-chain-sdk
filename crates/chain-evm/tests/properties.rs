@@ -18,6 +18,7 @@ fn tx(chain_id: u64, nonce: u64, to: Address, value: u128, gas: u64) -> Unsigned
         max_priority_fee_per_gas: 1_000_000_000,
         gas_price: None,
         tx_type: EvmTxType::Eip1559,
+        l1_data_fee_wei: Default::default(),
     }
 }
 

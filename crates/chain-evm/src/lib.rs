@@ -61,7 +61,12 @@ pub enum EvmError {
 pub enum FeeModel {
     Eip1559,
     Legacy,
-    Eip1559WithL1DataFee,
+    /// Arbitrum Nitro: `eth_estimateGas` already includes the L1 data cost (as extra gas), so the quote is complete
+    /// once a safety margin is added to the estimate.
+    ArbitrumNitro,
+    /// OP stack (Base, Optimism): the L1 data fee is charged IN ADDITION to `gas * price` and is read from the
+    /// `GasPriceOracle` predeploy before every transaction is prepared.
+    OpStack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +122,7 @@ pub const ARBITRUM: EvmChain = EvmChain {
     native_symbol: "ETH",
     native_decimals: 18,
     eip1559: true,
-    fee_model: FeeModel::Eip1559WithL1DataFee,
+    fee_model: FeeModel::ArbitrumNitro,
     confirmations: 1,
 };
 pub const OPTIMISM: EvmChain = EvmChain {
@@ -126,7 +131,7 @@ pub const OPTIMISM: EvmChain = EvmChain {
     native_symbol: "ETH",
     native_decimals: 18,
     eip1559: true,
-    fee_model: FeeModel::Eip1559WithL1DataFee,
+    fee_model: FeeModel::OpStack,
     confirmations: 1,
 };
 pub const BASE: EvmChain = EvmChain {
@@ -135,7 +140,44 @@ pub const BASE: EvmChain = EvmChain {
     native_symbol: "ETH",
     native_decimals: 18,
     eip1559: true,
-    fee_model: FeeModel::Eip1559WithL1DataFee,
+    fee_model: FeeModel::OpStack,
+    confirmations: 1,
+};
+/// Public test networks of the networks above. Their identity (chain id) is checked against the node like any other.
+pub const POLYGON_AMOY: EvmChain = EvmChain {
+    name: "polygon-amoy",
+    chain_id: 80_002,
+    native_symbol: "POL",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::Eip1559,
+    confirmations: 12,
+};
+pub const BSC_TESTNET: EvmChain = EvmChain {
+    name: "bsc-testnet",
+    chain_id: 97,
+    native_symbol: "tBNB",
+    native_decimals: 18,
+    eip1559: false,
+    fee_model: FeeModel::Legacy,
+    confirmations: 15,
+};
+pub const ARBITRUM_SEPOLIA: EvmChain = EvmChain {
+    name: "arbitrum-sepolia",
+    chain_id: 421_614,
+    native_symbol: "ETH",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::ArbitrumNitro,
+    confirmations: 1,
+};
+pub const BASE_SEPOLIA: EvmChain = EvmChain {
+    name: "base-sepolia",
+    chain_id: 84_532,
+    native_symbol: "ETH",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::OpStack,
     confirmations: 1,
 };
 pub const ANVIL: EvmChain = EvmChain {
@@ -149,7 +191,18 @@ pub const ANVIL: EvmChain = EvmChain {
 };
 
 pub const PROFILES: &[EvmChain] = &[
-    ETHEREUM, SEPOLIA, POLYGON, BSC, ARBITRUM, OPTIMISM, BASE, ANVIL,
+    ETHEREUM,
+    SEPOLIA,
+    POLYGON,
+    BSC,
+    ARBITRUM,
+    OPTIMISM,
+    BASE,
+    POLYGON_AMOY,
+    BSC_TESTNET,
+    ARBITRUM_SEPOLIA,
+    BASE_SEPOLIA,
+    ANVIL,
 ];
 
 impl EvmChain {
@@ -515,6 +568,33 @@ impl EvmProvider {
         parse_hex_bytes(&value)
     }
 
+    /// The OP-stack L1 data fee for a transaction, from the `GasPriceOracle` predeploy (`getL1Fee(bytes)` takes the
+    /// unsigned transaction encoding). Only meaningful on [`FeeModel::OpStack`] chains.
+    pub async fn l1_data_fee(&self, unsigned_payload: &[u8]) -> Result<U256, EvmError> {
+        if self.chain.fee_model != FeeModel::OpStack {
+            return Ok(U256::zero());
+        }
+        let oracle: Address = "0x420000000000000000000000000000000000000F"
+            .parse()
+            .map_err(|_| EvmError::UnsupportedFeeModel)?;
+        let mut input = selector("getL1Fee(bytes)").to_vec();
+        let mut word = [0u8; 32];
+        word[31] = 0x20;
+        input.extend_from_slice(&word);
+        let mut len = [0u8; 32];
+        len[24..].copy_from_slice(&(unsigned_payload.len() as u64).to_be_bytes());
+        input.extend_from_slice(&len);
+        input.extend_from_slice(unsigned_payload);
+        while input.len() % 32 != 4 {
+            input.push(0);
+        }
+        let out = self.call(oracle, &input).await?;
+        if out.len() != 32 {
+            return Err(EvmError::UnsupportedFeeModel);
+        }
+        Ok(U256::from_big_endian(&out))
+    }
+
     pub async fn broadcast(&self, raw: &[u8]) -> Result<B256, EvmError> {
         let value: Value = self
             .rpc(
@@ -596,6 +676,9 @@ pub struct UnsignedEvmTransaction {
     pub max_priority_fee_per_gas: u128,
     pub gas_price: Option<u128>,
     pub tx_type: EvmTxType,
+    /// Extra fee the network charges on top of `gas_limit * price` (OP stack L1 data fee, already including a safety
+    /// buffer). Informational and part of the balance check; it is NOT part of the signed payload.
+    pub l1_data_fee_wei: U256,
 }
 
 fn append_u256(stream: &mut rlp::RlpStream, value: U256) {
@@ -764,7 +847,7 @@ pub async fn prepare_deployment(
     if provider.native_balance(from).await? < max_cost {
         return Err(EvmError::InsufficientFunds);
     }
-    Ok(UnsignedEvmTransaction {
+    let tx = UnsignedEvmTransaction {
         chain_id: provider.chain.chain_id,
         nonce,
         to: TxKind::Create,
@@ -775,7 +858,9 @@ pub async fn prepare_deployment(
         max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
         gas_price: fees.gas_price,
         tx_type: fees.tx_type,
-    })
+        l1_data_fee_wei: U256::zero(),
+    };
+    with_l1_fee(provider, from, tx).await
 }
 
 /// Build an unsigned EIP-1559 native transfer using an already reserved nonce.
@@ -795,7 +880,7 @@ pub async fn prepare_native_transfer_with_nonce(
     if provider.native_balance(from).await? < max_cost {
         return Err(EvmError::InsufficientFunds);
     }
-    Ok(UnsignedEvmTransaction {
+    let tx = UnsignedEvmTransaction {
         chain_id: provider.chain.chain_id,
         nonce,
         to: TxKind::Call(to),
@@ -806,7 +891,9 @@ pub async fn prepare_native_transfer_with_nonce(
         max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
         gas_price: fees.gas_price,
         tx_type: fees.tx_type,
-    })
+        l1_data_fee_wei: U256::zero(),
+    };
+    with_l1_fee(provider, from, tx).await
 }
 
 /// Build an unsigned EIP-1559 native transfer. No signing occurs here.
@@ -818,6 +905,41 @@ pub async fn prepare_native_transfer(
 ) -> Result<UnsignedEvmTransaction, EvmError> {
     let nonce = provider.pending_nonce(from).await?;
     prepare_native_transfer_with_nonce(provider, from, to, value, nonce).await
+}
+
+/// Largest L1 data fee this wallet accepts on an OP-stack chain (0.01 ETH): a bound, not an estimate.
+pub const MAX_L1_DATA_FEE_WEI: u128 = 10_000_000_000_000_000;
+
+/// Add the OP-stack L1 data fee (plus a 25 % buffer) to a prepared transaction and re-check the balance against the
+/// COMPLETE cost. Other fee models are returned unchanged.
+async fn with_l1_fee(
+    provider: &EvmProvider,
+    from: Address,
+    mut tx: UnsignedEvmTransaction,
+) -> Result<UnsignedEvmTransaction, EvmError> {
+    if provider.chain.fee_model != FeeModel::OpStack {
+        return Ok(tx);
+    }
+    let raw = provider.l1_data_fee(&tx.signing_payload()).await?;
+    let buffered = raw
+        .checked_add(raw / U256::from(4u64))
+        .ok_or(EvmError::FeeRejected)?;
+    if buffered > U256::from(MAX_L1_DATA_FEE_WEI) {
+        return Err(EvmError::FeeRejected);
+    }
+    let gas_cost = U256::from(tx.max_fee_per_gas)
+        .checked_mul(U256::from(tx.gas_limit))
+        .ok_or(EvmError::FeeRejected)?;
+    let total = tx
+        .value
+        .checked_add(gas_cost)
+        .and_then(|v| v.checked_add(buffered))
+        .ok_or(EvmError::FeeRejected)?;
+    if provider.native_balance(from).await? < total {
+        return Err(EvmError::InsufficientFunds);
+    }
+    tx.l1_data_fee_wei = buffered;
+    Ok(tx)
 }
 
 fn selector(signature: &str) -> [u8; 4] {
@@ -998,7 +1120,7 @@ pub async fn prepare_erc20_transfer_with_nonce(
     if provider.native_balance(from).await? < max_cost {
         return Err(EvmError::InsufficientFunds);
     }
-    Ok(UnsignedEvmTransaction {
+    let tx = UnsignedEvmTransaction {
         chain_id: provider.chain.chain_id,
         nonce,
         to: TxKind::Call(token.contract),
@@ -1009,7 +1131,9 @@ pub async fn prepare_erc20_transfer_with_nonce(
         max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
         gas_price: fees.gas_price,
         tx_type: fees.tx_type,
-    })
+        l1_data_fee_wei: U256::zero(),
+    };
+    with_l1_fee(provider, from, tx).await
 }
 
 /// Build an unsigned ERC-20 transfer using an already reserved nonce.
@@ -1078,6 +1202,7 @@ mod tests {
                 max_priority_fee_per_gas: 1_000_000_000,
                 gas_price: Some(2_000_000_000),
                 tx_type,
+                l1_data_fee_wei: U256::zero(),
             };
             // r = 0x0000..01 (31 leading zero bytes), s = 0x00ab..: both valid, low-S.
             let mut sig = [0u8; 65];
