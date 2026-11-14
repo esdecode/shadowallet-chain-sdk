@@ -53,7 +53,7 @@ pub enum TronError {
 }
 
 /// Transactions are valid for this long after the chain time they were built at.
-pub const EXPIRATION_MS: u64 = 90_000;
+pub const EXPIRATION_MS: u64 = 180_000;
 /// A transaction included this many blocks ago is treated as final (about one minute on TRON).
 pub const FINALITY_BLOCKS: u64 = 19;
 
