@@ -37,7 +37,13 @@ async fn scans_real_stagenet_blocks_and_survives_restart() {
         node.daemon.latest_block_number().await.unwrap() as u64
     };
     let restore = tip - 40;
-    store.register_account("monero-stagenet", &acct.primary_address().to_string(), restore).unwrap();
+    store
+        .register_account(
+            "monero-stagenet",
+            &acct.primary_address().to_string(),
+            restore,
+        )
+        .unwrap();
     let r = sync(&store, &acct, &node, 100).await.unwrap();
     println!("sync {r:?}");
     assert_eq!(r.from, restore);
@@ -48,7 +54,10 @@ async fn scans_real_stagenet_blocks_and_survives_restart() {
     drop(store);
     let store = MoneroStore::open(&path).unwrap();
     let r2 = sync(&store, &acct, &node, 100).await.unwrap();
-    assert!(r2.from > r.to - 5, "resumed from the checkpoint, got {r2:?}");
+    assert!(
+        r2.from > r.to - 5,
+        "resumed from the checkpoint, got {r2:?}"
+    );
     assert_eq!(r2.reorg_depth, 0);
 }
 
@@ -59,12 +68,33 @@ async fn unfunded_send_fails_closed_and_mainnet_never_signs() {
     let dir = tempfile::tempdir().unwrap();
     let acct = account();
     let store = MoneroStore::open(&dir.path().join("x.db")).unwrap();
-    store.register_account("monero-stagenet", &acct.primary_address().to_string(), 1).unwrap();
+    store
+        .register_account("monero-stagenet", &acct.primary_address().to_string(), 1)
+        .unwrap();
     let to = acct.address_at(1).to_string();
-    let err = prepare_send(&store, &acct, &node, &to, 1_000_000_000, FeePriority::Normal).await.err().unwrap();
+    let err = prepare_send(
+        &store,
+        &acct,
+        &node,
+        &to,
+        1_000_000_000,
+        FeePriority::Normal,
+    )
+    .await
+    .err()
+    .unwrap();
     assert!(err.to_string().contains("insufficient"), "{err}");
     // a mainnet node handle is refused before any key is touched
-    let main_node = Node { net: MAINNET, daemon: node.daemon };
-    let err = prepare_send(&store, &acct, &main_node, &to, 1, FeePriority::Normal).await.err().unwrap();
-    assert!(err.to_string().contains("mainnet signing is disabled"), "{err}");
+    let main_node = Node {
+        net: MAINNET,
+        daemon: node.daemon,
+    };
+    let err = prepare_send(&store, &acct, &main_node, &to, 1, FeePriority::Normal)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        err.to_string().contains("mainnet signing is disabled"),
+        "{err}"
+    );
 }

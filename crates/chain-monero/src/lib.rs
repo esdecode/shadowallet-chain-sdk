@@ -18,7 +18,7 @@ pub use account::{MoneroAccount, parse_address};
 pub use network::{MAINNET, MoneroNet, NETS, STAGENET, TESTNET};
 pub use send::{PreparedSend, RING_SIZE, prepare_send, publish_signed, sign_prepared};
 pub use store::{MoneroStore, OwnedOutput, TxRecord};
-pub use sync::{Balance, Node, SyncReport, balance, connect, reconcile_pending, sync};
+pub use sync::{Balance, Node, SyncReport, balance, connect, reconcile_pending, sync, tip};
 
 pub use monero_wallet::address::{MoneroAddress, Network, SubaddressIndex};
 pub use monero_wallet::interface::FeePriority;

@@ -68,6 +68,11 @@ pub async fn connect(net: MoneroNet, url: &str) -> Result<Node, MoneroError> {
     Ok(Node { net, daemon })
 }
 
+/// The node's current tip height.
+pub async fn tip(node: &Node) -> Result<u64, MoneroError> {
+    Ok(node.daemon.latest_block_number().await.map_err(node_err)? as u64)
+}
+
 fn timelock_height(t: Timelock) -> u64 {
     match t {
         Timelock::None => 0,
