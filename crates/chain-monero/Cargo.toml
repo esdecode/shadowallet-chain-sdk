@@ -1,0 +1,35 @@
+[package]
+name = "shadowallet-chain-monero"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Monero account derivation (BIP-44 m/44'/128'), subaddresses, wallet scanning and RingCT transaction construction on top of monero-oxide."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["monero", "wallet", "ringct"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+monero-wallet = "0.2.0"
+monero-simple-request-rpc = "0.1.0"
+monero-daemon-rpc = "0.2.0"
+hex.workspace = true
+bip32.workspace = true
+thiserror.workspace = true
+zeroize = "1"
+curve25519-dalek = "4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha3.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+bip39 = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+monero-wallet = "0.2.0"
+
+[lints]
+workspace = true

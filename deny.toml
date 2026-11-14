@@ -2,6 +2,13 @@
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
+# crypto-bigint 0.5.5 is pulled in only by monero-ed25519 (monero-oxide), which uses it in `Point::biased_hash`, i.e.
+# hash-to-point of PUBLIC output keys. No secret value flows through the affected timing-variable operations
+# (subtraction, zero counting, division, Montgomery multiplication), and the fixed release (>= 0.7.6) is
+# API-incompatible with monero-ed25519 0.1.0. Revisit when monero-oxide updates.
+ignore = [
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only touches public data inside monero-ed25519 (hash-to-point of output keys)" },
+]
 
 [licenses]
 allow = [
