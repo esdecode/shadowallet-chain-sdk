@@ -106,7 +106,7 @@ impl Point {
       let y = value.pow(&sqrt_exp);
       let other_candidate = y * z;
       // If `value` is a quadratic residue, one of these will be its square root
-      y.square().ct_eq(value) | other_candidate.square().ct_eq(value)
+      CtEq::ct_eq(&y.square(), value) | CtEq::ct_eq(&other_candidate.square(), value)
     }
 
     // Check if `upsilon` is a valid `u` coordinate by checking for a solution for the square root of
