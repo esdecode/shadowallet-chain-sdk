@@ -109,14 +109,23 @@ fn block_hash(h: u64) -> String {
     }
 }
 
-fn funding(account: &DogeAccount) -> (String, String, String, ScriptBuf) {
+fn funding(account: &DogeAccount, coinbase: bool) -> (String, String, String, ScriptBuf) {
     let address = account.address(0, 0).unwrap();
     let script = address.script_pubkey();
     let tx = Transaction {
         version: doge::transaction::Version(1),
         lock_time: doge::absolute::LockTime::ZERO,
         input: vec![TxIn {
-            previous_output: OutPoint::null(),
+            previous_output: if coinbase {
+                OutPoint::null()
+            } else {
+                OutPoint {
+                    txid: "1111111111111111111111111111111111111111111111111111111111111111"
+                        .parse()
+                        .unwrap(),
+                    vout: 0,
+                }
+            },
             script_sig: ScriptBuf::from_bytes(vec![0x04, 1, 2, 3, 4]),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -135,7 +144,11 @@ fn funding(account: &DogeAccount) -> (String, String, String, ScriptBuf) {
 }
 
 fn start(account: &DogeAccount) -> Mock {
-    let (address, funding_hex, funding_txid, script) = funding(account);
+    start_with(account, false)
+}
+
+fn start_with(account: &DogeAccount, coinbase: bool) -> Mock {
+    let (address, funding_hex, funding_txid, script) = funding(account, coinbase);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let hits: Arc<Mutex<HashMap<String, u32>>> = Arc::default();
@@ -658,4 +671,19 @@ fn used_change_addresses_are_rediscovered_and_never_reused() {
     assert_eq!(again.change_index(), 4);
     again.sync().unwrap();
     assert_eq!(again.change_index(), 4);
+}
+
+#[test]
+fn an_immature_coinbase_output_is_dropped_before_any_cross_check_is_spent_on_it() {
+    let (acct, xpub, fp) = account();
+    let m = start_with(&acct, true); // the funding transaction is a block reward with 11 confirmations
+    let (mut e, _d) = engine(&m, &xpub, fp, |_| {});
+    let report = e.sync().unwrap();
+    assert_eq!(report.utxos, 0, "a young block reward is not spendable");
+    assert_eq!(e.balance().confirmed_sats, 0);
+    assert_eq!(
+        hits(&m, "rpc:gettxout"),
+        0,
+        "no scarce node call was spent on it"
+    );
 }

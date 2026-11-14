@@ -34,7 +34,7 @@ const SOCHAIN_NETWORK: &str = "DOGETEST";
 /// How deep below the tip the two services are made to agree on a block hash.
 const CROSS_CHECK_DEPTH: u64 = 12;
 /// Spendable UTXOs that are cross-checked per sync (the rest are ignored, never trusted).
-pub const MAX_VERIFIED_UTXOS: usize = 10;
+pub const MAX_VERIFIED_UTXOS: usize = 5;
 /// Coinbase outputs need this many confirmations before they may be spent.
 const COINBASE_MATURITY: u32 = 240;
 /// The indexer's UTXO page size, and how many pages one address may use (400 outputs).
@@ -82,6 +82,8 @@ pub struct VerifiedUtxo {
     pub vout: u32,
     pub value_sats: u64,
     pub confirmations: u32,
+    /// Taken from the validated raw transaction (its only input is the null outpoint), not from the provider's claim.
+    pub coinbase: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,6 +523,7 @@ impl Indexer {
                 vout: index as u32,
                 value_sats: claimed,
                 confirmations,
+                coinbase: tx.is_coinbase(),
             });
         }
         Ok(out)
@@ -600,6 +603,10 @@ impl Indexer {
                 all.push((i, u));
             }
         }
+        // A coinbase output younger than the maturity cannot be spent: drop it BEFORE spending the scarce
+        // cross-check budget on it (otherwise a few fresh block rewards would starve the mature coins). The raw
+        // transaction was validated against its txid, and the node's own coinbase flag is still checked below.
+        all.retain(|(_, u)| !(u.coinbase && u.confirmations < COINBASE_MATURITY));
         all.sort_by_key(|entry| std::cmp::Reverse(entry.1.value_sats));
         let mut spendable = Vec::new();
         for (i, u) in all.into_iter().take(MAX_VERIFIED_UTXOS) {
