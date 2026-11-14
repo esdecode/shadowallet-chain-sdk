@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Prints the stagenet primary address of the BIP-39 seed (hex) read from stdin. Used by the E2E tooling so the
 //! recovery phrase never appears on a command line or in a log.
 use std::io::Read;
