@@ -1,0 +1,33 @@
+[package]
+name = "shadowallet-chain-tron"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "TRON account derivation, Base58Check addresses, local protobuf transaction construction, TRC-20 and node access."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["tron", "trc20", "wallet", "transaction"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bip32.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+secp256k1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+bip39 = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

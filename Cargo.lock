@@ -2357,6 +2357,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "shadowallet-chain-tron"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bip32",
+ "bip39",
+ "hex",
+ "reqwest",
+ "rusqlite",
+ "secp256k1 0.31.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "shadowallet-chain-utxo"
 version = "0.1.0-alpha.1"
 dependencies = [
