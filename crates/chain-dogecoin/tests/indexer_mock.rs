@@ -40,6 +40,7 @@ struct Behaviour {
     fee: Option<f64>,
     unknown_tx: bool,
     tx_conf: i64,
+    history_on: Vec<String>,
 }
 
 struct Mock {
@@ -273,6 +274,16 @@ fn start(account: &DogeAccount) -> Mock {
                             block_hash(h)
                         };
                         ok(json!({"height": h, "hash": hash}))
+                    }
+                    "transactions"
+                        if segs
+                            .get(5)
+                            .is_some_and(|a| b.history_on.iter().any(|h| h == a)) =>
+                    {
+                        ok(json!({"transactions": [{
+                            "hash": format!("{:064x}", 77), "value_sent": "0.00000000",
+                            "value_received": "1.00000000", "block": TIP - 20
+                        }]}))
                     }
                     "unspent_outputs" | "transactions"
                         if segs.get(5) != Some(&addr.as_str())
@@ -613,4 +624,38 @@ fn mainnet_cannot_use_the_public_indexer_backend() {
     );
     assert!(r.unwrap_err().to_string().contains("testnet only"));
     let _ = xpub;
+}
+
+#[test]
+fn used_change_addresses_are_rediscovered_and_never_reused() {
+    let (acct, xpub, fp) = account();
+    let m = start(&acct);
+    let (mut e, _d) = engine(&m, &xpub, fp, |_| {});
+    assert_eq!(e.change_index(), 0);
+    // change addresses 0, 1 and 3 already appear in history (a gap at 2 is possible after pruning)
+    let used: Vec<String> = [0u32, 1, 3]
+        .iter()
+        .map(|i| acct.address(1, *i).unwrap().to_string())
+        .collect();
+    set(&m, |b| b.history_on = used.clone());
+    // the window is only lookahead/4 wide; index 3 must be inside it for this to be visible
+    e.sync().unwrap();
+    assert_eq!(
+        e.change_index(),
+        4,
+        "next change address is after the highest used one"
+    );
+    // it persists across a reopen and never moves backwards
+    drop(e);
+    set(&m, |b| b.history_on = Vec::new());
+    let dir = _d.path().join("d.sqlite");
+    let mut cfg = IndexerConfig::public_testnet();
+    cfg.sochain_base = format!("{}/api/v3", m.base);
+    cfg.rpc_url = format!("{}/rpc", m.base);
+    cfg.request_timeout = Duration::from_secs(3);
+    cfg.rpc_per_minute = 1000;
+    let mut again = DogeEngine::open_indexer(DogeNetwork::Testnet, &xpub, fp, cfg, &dir).unwrap();
+    assert_eq!(again.change_index(), 4);
+    again.sync().unwrap();
+    assert_eq!(again.change_index(), 4);
 }

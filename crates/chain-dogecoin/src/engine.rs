@@ -282,8 +282,50 @@ impl DogeEngine {
             self.addresses
                 .push((0, index, address.clone(), address.script_pubkey()));
         }
-        for index in 0..(lookahead / 4).max(1) {
+        for index in 0..(lookahead / 4)
+            .max(1)
+            .max(self.change_index.saturating_add(Self::CHANGE_GAP))
+        {
             let address = self.account.address(1, index)?;
+            self.addresses
+                .push((1, index, address.clone(), address.script_pubkey()));
+        }
+        Ok(())
+    }
+
+    /// How many change addresses beyond the highest one in use are watched.
+    const CHANGE_GAP: u32 = 2;
+
+    /// Bring the change index past every change address that a known transaction already paid, so a
+    /// restored or reinstalled wallet never hands out a used change address again, and keep the
+    /// watched change window ahead of it.
+    fn adopt_used_change<'a>(
+        &mut self,
+        txs: impl Iterator<Item = &'a Transaction>,
+    ) -> Result<(), DogecoinSdkError> {
+        let change: HashMap<ScriptBuf, u32> = self
+            .addresses
+            .iter()
+            .filter(|(k, _, _, _)| *k == 1)
+            .map(|(_, i, _, s)| (s.clone(), *i))
+            .collect();
+        let highest = txs
+            .flat_map(|t| t.output.iter())
+            .filter_map(|o| change.get(&o.script_pubkey))
+            .max()
+            .copied();
+        if let Some(h) = highest {
+            self.change_index = self.change_index.max(h.saturating_add(1));
+        }
+        self.extend_change_window()
+    }
+
+    fn extend_change_window(&mut self) -> Result<(), DogecoinSdkError> {
+        let want = self.change_index.saturating_add(Self::CHANGE_GAP);
+        let have = self.addresses.iter().filter(|(k, _, _, _)| *k == 1).count() as u32;
+        for index in have..want {
+            let address = self.account.address(1, index)?;
+            self.import_address(&address)?;
             self.addresses
                 .push((1, index, address.clone(), address.script_pubkey()));
         }
@@ -360,6 +402,10 @@ impl DogeEngine {
     /// Synchronise from the two public services: every spendable UTXO is validated against its own raw
     /// transaction and confirmed by the second service before it is accepted.
     fn sync_indexer(&mut self) -> Result<DogeSyncReport, DogecoinSdkError> {
+        self.sync_indexer_round(0)
+    }
+
+    fn sync_indexer_round(&mut self, round: u32) -> Result<DogeSyncReport, DogecoinSdkError> {
         let Some(ix) = self.indexer() else {
             return Err(DogecoinSdkError::Transaction("no indexer".to_owned()));
         };
@@ -372,7 +418,23 @@ impl DogeEngine {
             .collect();
         let verified = ix.verified_utxos(&scan, tip)?;
         let names: Vec<String> = scan.iter().map(|(a, _)| a.clone()).collect();
-        let history = ix.history(&names, tip)?;
+        let (history, used) = ix.history_with_used(&names, tip)?;
+        let highest_used_change = used
+            .iter()
+            .filter_map(|i| self.addresses.get(*i))
+            .filter(|(k, _, _, _)| *k == 1)
+            .map(|(_, index, _, _)| *index)
+            .max();
+        // A used change address near the end of the watched window means more may follow: widen the
+        // window and look again (bounded), exactly as a gap limit does on restore.
+        if let Some(h) = highest_used_change {
+            self.change_index = self.change_index.max(h.saturating_add(1));
+        }
+        let watched = self.addresses.len();
+        self.extend_change_window()?;
+        if self.addresses.len() > watched && round < 16 {
+            return self.sync_indexer_round(round + 1);
+        }
         let mut utxos = Vec::new();
         for (i, u) in verified {
             let (keychain, index, _, _) = &self.addresses[i];
@@ -551,6 +613,7 @@ impl DogeEngine {
                 confirmation_height: height,
             });
         }
+        self.adopt_used_change(tx_cache.values())?;
         self.history = history;
         self.persist()?;
         Ok(DogeSyncReport {

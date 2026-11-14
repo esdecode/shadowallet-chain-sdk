@@ -619,13 +619,27 @@ impl Indexer {
         addresses: &[String],
         tip: u64,
     ) -> Result<Vec<UtxoHistoryEntry>, DogecoinSdkError> {
+        self.history_with_used(addresses, tip).map(|(h, _)| h)
+    }
+
+    /// Like [`Indexer::history`], also returning the positions (in `addresses`) of every address that
+    /// appears in at least one transaction. Used to keep change addresses from being handed out twice.
+    pub fn history_with_used(
+        &self,
+        addresses: &[String],
+        tip: u64,
+    ) -> Result<(Vec<UtxoHistoryEntry>, Vec<usize>), DogecoinSdkError> {
         let mut merged: Vec<UtxoHistoryEntry> = Vec::new();
-        for address in addresses {
+        let mut used: Vec<usize> = Vec::new();
+        for (position, address) in addresses.iter().enumerate() {
             let data = self.sochain_get(&format!("transactions/{SOCHAIN_NETWORK}/{address}/1"))?;
             let list = data
                 .get("transactions")
                 .and_then(Value::as_array)
                 .ok_or_else(|| err("malformed", "history is not a list"))?;
+            if !list.is_empty() {
+                used.push(position);
+            }
             for t in list {
                 let hash = t.get("hash").and_then(Value::as_str).unwrap_or_default();
                 let received = t
@@ -656,7 +670,7 @@ impl Indexer {
                 }
             }
         }
-        Ok(merged)
+        Ok((merged, used))
     }
 
     // --------------------------------------------------------------------- fees
