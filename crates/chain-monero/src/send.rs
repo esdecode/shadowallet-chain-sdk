@@ -50,6 +50,7 @@ pub async fn prepare_send(
     to: &str,
     amount: u64,
     priority: FeePriority,
+    only_outputs: Option<&[i64]>,
 ) -> Result<PreparedSend, MoneroError> {
     if node.net.is_mainnet {
         return Err(MoneroError::Send("mainnet signing is disabled".to_owned()));
@@ -67,17 +68,38 @@ pub async fn prepare_send(
         .await
         .map_err(node_err)?;
 
-    let mut spendable: Vec<_> = store
-        .outputs()?
-        .into_iter()
-        .filter(|o| {
-            o.spent_in.is_none()
-                && !o.reserved
-                && tip + 1 >= o.height + SPEND_CONFIRMATIONS as u64
-                && o.timelock_height <= tip + 1
-        })
-        .collect();
-    spendable.sort_by_key(|o| std::cmp::Reverse(o.amount));
+    let is_spendable = |o: &crate::OwnedOutput| {
+        o.spent_in.is_none()
+            && !o.reserved
+            && tip + 1 >= o.height + SPEND_CONFIRMATIONS as u64
+            && o.timelock_height <= tip + 1
+    };
+    let mut spendable: Vec<_> = store.outputs()?.into_iter().filter(is_spendable).collect();
+    // Coin control: the caller names the exact outputs; every one must be spendable and ALL of them are spent
+    // (spending a subset would silently differ from what was reviewed).
+    let forced = only_outputs.is_some();
+    if let Some(ids) = only_outputs {
+        if ids.is_empty() || ids.len() > MAX_OUTPUTS {
+            return Err(MoneroError::Send(format!(
+                "coin control needs between 1 and {MAX_OUTPUTS} outputs"
+            )));
+        }
+        let mut picked = Vec::new();
+        for id in ids {
+            let Some(o) = spendable.iter().find(|o| o.id == *id) else {
+                return Err(MoneroError::Send(format!(
+                    "output {id} is not spendable (unknown, locked, reserved or spent)"
+                )));
+            };
+            if picked.iter().any(|p: &crate::OwnedOutput| p.id == o.id) {
+                return Err(MoneroError::Send("an output was selected twice".to_owned()));
+            }
+            picked.push(o.clone());
+        }
+        spendable = picked;
+    } else {
+        spendable.sort_by_key(|o| std::cmp::Reverse(o.amount));
+    }
     let available: u64 = spendable.iter().map(|o| o.amount).sum();
 
     let mut decoyed: HashMap<i64, OutputWithDecoys> = HashMap::new();
@@ -104,6 +126,10 @@ pub async fn prepare_send(
             .collect();
         let mut ovk = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(ovk.as_mut());
+        let all_forced_in = !forced || chosen.len() == spendable.len();
+        if !all_forced_in {
+            continue;
+        }
         match SignableTransaction::new(
             RctType::ClsagBulletproofPlus,
             ovk,

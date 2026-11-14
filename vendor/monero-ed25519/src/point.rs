@@ -59,7 +59,7 @@ impl Point {
     // `tests/biased_hash_vectors.txt` (4000 vectors generated with the original 0.5-based implementation).
     use crypto_bigint::{
       CtEq, U256, const_monty_params,
-      ctutils::CtSelect,
+      ctutils::CtSelect as _,
       modular::ConstMontyForm,
     };
 

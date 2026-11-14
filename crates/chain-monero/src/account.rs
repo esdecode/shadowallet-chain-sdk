@@ -38,6 +38,26 @@ impl MoneroAccount {
         Self::from_spend_scalar(network, index, spend)
     }
 
+    /// Restore from a Monero 25-word seed (the spend key is the seed reduced modulo the group order, as
+    /// official Monero wallets do).
+    pub fn from_monero_seed(network: Network, words: &str) -> Result<Self, MoneroError> {
+        let seed = crate::seed::words_to_seed(words)?;
+        Self::from_spend_key(network, *seed)
+    }
+
+    /// The 25-word Monero seed of this account. It encodes the (reduced) spend key, so any official Monero wallet
+    /// restores the same funds from it; this works for accounts derived from the BIP-39 phrase too, without
+    /// changing their derivation. Treat the words exactly like the recovery phrase.
+    pub fn monero_seed_words(&self) -> Zeroizing<String> {
+        crate::seed::seed_to_words(&<[u8; 32]>::from(*self.spend))
+    }
+
+    /// A legacy integrated address: the primary address with an 8-byte payment id.
+    pub fn integrated_address(&self, payment_id: [u8; 8]) -> MoneroAddress {
+        self.pair
+            .legacy_integrated_address(self.network, payment_id)
+    }
+
     /// From a raw 32-byte spend secret, e.g. an imported key (reduced modulo the group order).
     pub fn from_spend_key(network: Network, spend_secret: [u8; 32]) -> Result<Self, MoneroError> {
         Self::from_spend_scalar(network, 0, reduce(spend_secret))
@@ -172,6 +192,54 @@ mod tests {
             parse_address(Network::Stagenet, &broken).is_err(),
             "checksum must be verified"
         );
+    }
+
+    #[test]
+    fn restores_from_independent_python_monero_vectors() {
+        for line in include_str!("../tests/monero_seed_vectors.txt").lines() {
+            let f: Vec<&str> = line.split(" | ").collect();
+            let a = MoneroAccount::from_monero_seed(Network::Stagenet, f[1]).unwrap();
+            assert_eq!(*a.spend_key_hex(), f[2], "spend key for {}", f[0]);
+            assert_eq!(*a.view_key_hex(), f[3], "view key for {}", f[0]);
+            assert_eq!(
+                a.primary_address().to_string(),
+                f[4],
+                "stagenet address for {}",
+                f[0]
+            );
+            let m = MoneroAccount::from_monero_seed(Network::Mainnet, f[1]).unwrap();
+            assert_eq!(
+                m.primary_address().to_string(),
+                f[5],
+                "mainnet address for {}",
+                f[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_bip39_derived_account_exports_a_seed_that_restores_the_same_wallet() {
+        let a = MoneroAccount::from_seed(Network::Stagenet, &seed(), 0).unwrap();
+        let words = a.monero_seed_words();
+        let b = MoneroAccount::from_monero_seed(Network::Stagenet, &words).unwrap();
+        assert_eq!(
+            a.primary_address().to_string(),
+            b.primary_address().to_string()
+        );
+        assert_eq!(*a.view_key_hex(), *b.view_key_hex());
+        assert_eq!(a.address_at(3).to_string(), b.address_at(3).to_string());
+    }
+
+    #[test]
+    fn integrated_addresses_carry_the_payment_id_and_the_same_keys() {
+        let a = MoneroAccount::from_seed(Network::Stagenet, &seed(), 0).unwrap();
+        let i = a.integrated_address([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(i.payment_id(), Some([1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(i.spend(), a.primary_address().spend());
+        assert_ne!(i.to_string(), a.primary_address().to_string());
+        assert_eq!(i.to_string().len(), 106);
+        let parsed = parse_address(Network::Stagenet, &i.to_string()).unwrap();
+        assert_eq!(parsed.payment_id(), Some([1, 2, 3, 4, 5, 6, 7, 8]));
     }
 
     #[test]

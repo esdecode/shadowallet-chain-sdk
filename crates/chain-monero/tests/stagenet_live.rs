@@ -18,16 +18,16 @@ fn account() -> MoneroAccount {
 #[tokio::test]
 #[ignore = "network"]
 async fn identity_is_enforced() {
-    connect(STAGENET, NODE).await.unwrap();
-    let err = connect(MAINNET, NODE).await.err().unwrap();
+    connect(STAGENET, NODE, None).await.unwrap();
+    let err = connect(MAINNET, NODE, None).await.err().unwrap();
     assert!(matches!(err, MoneroError::Network(_)), "{err}");
-    assert!(connect(TESTNET, NODE2).await.is_err());
+    assert!(connect(TESTNET, NODE2, None).await.is_err());
 }
 
 #[tokio::test]
 #[ignore = "network"]
 async fn scans_real_stagenet_blocks_and_survives_restart() {
-    let node = connect(STAGENET, NODE).await.unwrap();
+    let node = connect(STAGENET, NODE, None).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("x.db");
     let acct = account();
@@ -64,7 +64,7 @@ async fn scans_real_stagenet_blocks_and_survives_restart() {
 #[tokio::test]
 #[ignore = "network"]
 async fn unfunded_send_fails_closed_and_mainnet_never_signs() {
-    let node = connect(STAGENET, NODE).await.unwrap();
+    let node = connect(STAGENET, NODE, None).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let acct = account();
     let store = MoneroStore::open(&dir.path().join("x.db")).unwrap();
@@ -79,6 +79,7 @@ async fn unfunded_send_fails_closed_and_mainnet_never_signs() {
         &to,
         1_000_000_000,
         FeePriority::Normal,
+        None,
     )
     .await
     .err()
@@ -89,12 +90,100 @@ async fn unfunded_send_fails_closed_and_mainnet_never_signs() {
         net: MAINNET,
         daemon: node.daemon,
     };
-    let err = prepare_send(&store, &acct, &main_node, &to, 1, FeePriority::Normal)
+    let err = prepare_send(&store, &acct, &main_node, &to, 1, FeePriority::Normal, None)
         .await
         .err()
         .unwrap();
     assert!(
         err.to_string().contains("mainnet signing is disabled"),
         "{err}"
+    );
+}
+
+/// A minimal SOCKS5 (no auth, CONNECT, domain names) forwarder standing in for Tor: proves that the node
+/// connection really goes through the proxy and that the host name is handed to the proxy unresolved (`socks5h`).
+async fn socks5_forwarder() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut c, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = seen2.clone();
+            tokio::spawn(async move {
+                let mut hello = [0u8; 2];
+                c.read_exact(&mut hello).await.unwrap();
+                let mut methods = vec![0u8; hello[1] as usize];
+                c.read_exact(&mut methods).await.unwrap();
+                c.write_all(&[5, 0]).await.unwrap();
+                let mut head = [0u8; 4];
+                c.read_exact(&mut head).await.unwrap();
+                assert_eq!(head[1], 1, "CONNECT");
+                let host = match head[3] {
+                    3 => {
+                        let mut len = [0u8; 1];
+                        c.read_exact(&mut len).await.unwrap();
+                        let mut name = vec![0u8; len[0] as usize];
+                        c.read_exact(&mut name).await.unwrap();
+                        String::from_utf8(name).unwrap()
+                    }
+                    1 => {
+                        let mut ip = [0u8; 4];
+                        c.read_exact(&mut ip).await.unwrap();
+                        format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+                    }
+                    other => panic!("unexpected address type {other}"),
+                };
+                let mut port = [0u8; 2];
+                c.read_exact(&mut port).await.unwrap();
+                let port = u16::from_be_bytes(port);
+                seen.lock().unwrap().push(format!("{host}:{port}"));
+                let Ok(mut up) = TcpStream::connect((host.as_str(), port)).await else {
+                    c.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                    return;
+                };
+                c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
+            });
+        }
+    });
+    (format!("socks5h://{addr}"), seen)
+}
+
+#[tokio::test]
+#[ignore = "network"]
+async fn node_traffic_goes_through_a_socks5h_proxy() {
+    let (proxy, seen) = socks5_forwarder().await;
+    let node = connect(STAGENET, NODE, Some(&proxy)).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let acct = account();
+    let store = MoneroStore::open(&dir.path().join("x.db")).unwrap();
+    let tip = tip(&node).await.unwrap();
+    store
+        .register_account(
+            "monero-stagenet",
+            &acct.primary_address().to_string(),
+            tip - 5,
+        )
+        .unwrap();
+    let r = sync(&store, &acct, &node, 20).await.unwrap();
+    assert!(r.to >= tip - 1);
+    let hosts = seen.lock().unwrap().clone();
+    assert!(!hosts.is_empty(), "no connection reached the proxy");
+    assert!(
+        hosts.iter().all(|h| h == "node.sethforprivacy.com:38089"),
+        "the proxy received the unresolved host name: {hosts:?}"
+    );
+    // a dead proxy fails closed instead of falling back to a direct connection
+    assert!(
+        connect(STAGENET, NODE, Some("socks5h://127.0.0.1:1"))
+            .await
+            .is_err()
     );
 }

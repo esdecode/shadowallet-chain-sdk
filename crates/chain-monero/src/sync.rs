@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use monero_simple_request_rpc::SimpleRequestTransport;
 use monero_wallet::transaction::Timelock;
 use monero_wallet::{
     Scanner,
@@ -18,7 +17,7 @@ use crate::{
     MoneroAccount, MoneroError, MoneroNet, MoneroStore, OwnedOutput, SPEND_CONFIRMATIONS, TxRecord,
 };
 
-pub type Daemon = monero_daemon_rpc::MoneroDaemon<SimpleRequestTransport>;
+pub type Daemon = monero_daemon_rpc::MoneroDaemon<crate::ProxyTransport>;
 
 /// A connected node that was verified to serve the expected network.
 pub struct Node {
@@ -50,13 +49,12 @@ fn node_err(e: impl std::fmt::Debug) -> MoneroError {
 
 /// Connect to a node over HTTP(S) and verify that block 0 is this network's genesis block.
 /// Third-party nodes learn your IP address and which blocks you request; see docs/shadowallet-privacy-features.md.
-pub async fn connect(net: MoneroNet, url: &str) -> Result<Node, MoneroError> {
+pub async fn connect(net: MoneroNet, url: &str, proxy: Option<&str>) -> Result<Node, MoneroError> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(MoneroError::Node("node URL must be http(s)".to_owned()));
     }
-    let daemon = SimpleRequestTransport::new(url.to_owned())
-        .await
-        .map_err(node_err)?;
+    let transport = crate::ProxyTransport::new(url, proxy).map_err(node_err)?;
+    let daemon = Daemon::new(transport).await.map_err(node_err)?;
     let genesis = daemon.block_by_number(0).await.map_err(node_err)?;
     if genesis.hash() != net.genesis_hash {
         return Err(MoneroError::Network(format!(
