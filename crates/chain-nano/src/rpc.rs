@@ -236,6 +236,26 @@ impl NanoRpc {
         Ok(out)
     }
 
+    /// Online representatives with voting weight, heaviest first (used to choose a representative for a new account).
+    pub async fn online_representatives(&self) -> Result<Vec<([u8; 32], u128)>, NanoError> {
+        let v = self
+            .call(json!({"action": "representatives_online", "weight": "true"}))
+            .await?;
+        let mut out = Vec::new();
+        if let Some(map) = v.get("representatives").and_then(Value::as_object) {
+            for (account, item) in map {
+                let weight = item
+                    .get("weight")
+                    .and_then(Value::as_str)
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(0);
+                out.push((crate::address::decode_address(account)?, weight));
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(out)
+    }
+
     pub async fn is_confirmed(&self, hash: &[u8; 32]) -> Result<bool, NanoError> {
         let v = self.call(json!({"action": "block_info", "json_block": "true", "hash": hex::encode_upper(hash)})).await?;
         Ok(v.get("confirmed").and_then(Value::as_str) == Some("true"))
