@@ -25,6 +25,7 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+hex.workspace = true
 blake2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 

@@ -124,6 +124,28 @@ fn network_registry_separates_live_test_and_beta() {
     let beta = NanoNet::verify("beta", BETA_NETWORK_ID).unwrap();
     assert_eq!((beta.kind, beta.can_sign()), (NetworkKind::Beta, true));
     assert_ne!(TEST_NETWORK_ID, BETA_NETWORK_ID);
+    // The private dev network is a fourth, separate identity: signing-capable, never confused with test or live.
+    let dev = NanoNet::verify("dev", DEV_NETWORK_ID).unwrap();
+    assert_eq!((dev.kind, dev.can_sign()), (NetworkKind::Dev, true));
+    assert!(NanoNet::identify("test", DEV_NETWORK_ID).is_err());
+    assert!(NanoNet::identify("dev", TEST_NETWORK_ID).is_err());
+    assert!(NanoNet::identify("dev", LIVE_NETWORK_ID).is_err());
+}
+
+#[test]
+fn dev_network_identity_follows_from_the_published_dev_genesis_key() {
+    // Observed from a real nano-node V28.2 dev build: Genesis block == the legacy open hash of the dev genesis key.
+    let public = h32("B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0");
+    let private = h32("34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4");
+    assert_eq!(public_key(&private), public);
+    use blake2::digest::consts::U32;
+    use blake2::{Blake2b, Digest};
+    let mut h = Blake2b::<U32>::new();
+    for _ in 0..3 {
+        h.update(public);
+    }
+    let id: [u8; 32] = h.finalize().into();
+    assert_eq!(hex::encode_upper(id), DEV_NETWORK_ID);
 }
 
 #[test]

@@ -12,6 +12,11 @@ pub const LIVE_NETWORK_ID: &str =
 pub const TEST_NETWORK_ID: &str =
     "B1D60C0B886B57401EF5A1DAA04340E53726AA6F4D706C085706F31BBD100CEE";
 
+/// Genesis block hash of the Nano **dev** network (`NANO_NETWORK=dev` build of nano-node): a private development
+/// network whose genesis private key is published in nano-node's source. Anyone can run one locally and fund
+/// themselves, so it is only for private validation (never a public test network) and it carries no value.
+pub const DEV_NETWORK_ID: &str = "04270D7F11C4B2B472F2854C5A59F2A7E84226CE9ED799DE75744BD7D85FC9D9";
+
 /// Network identifier reported by an official Nano V29 beta node synchronised with the public beta network.
 pub const BETA_NETWORK_ID: &str =
     "E1227CF974C1455A8B630433D94F3DDBF495EEAC9ADD2481A4A1D90A0D00F488";
@@ -24,6 +29,8 @@ pub enum NetworkKind {
     Test,
     /// The public beta network (kept; separate identity from test and live).
     Beta,
+    /// A private, self-hosted development network (public genesis key, low work thresholds). Not a public test network.
+    Dev,
 }
 
 impl NetworkKind {
@@ -32,6 +39,7 @@ impl NetworkKind {
             Self::Live => "live",
             Self::Test => "test",
             Self::Beta => "beta",
+            Self::Dev => "dev",
         }
     }
 }
@@ -47,10 +55,11 @@ pub struct NanoNet {
     pub network_identifier: String,
 }
 
-const PINNED: [(NetworkKind, &str); 3] = [
+const PINNED: [(NetworkKind, &str); 4] = [
     (NetworkKind::Live, LIVE_NETWORK_ID),
     (NetworkKind::Test, TEST_NETWORK_ID),
     (NetworkKind::Beta, BETA_NETWORK_ID),
+    (NetworkKind::Dev, DEV_NETWORK_ID),
 ];
 
 impl NanoNet {
