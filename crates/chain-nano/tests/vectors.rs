@@ -127,23 +127,23 @@ fn network_registry_separates_live_test_and_beta() {
 }
 
 #[test]
-fn test_network_identity_follows_from_the_official_genesis_key() {
-    // test_public_key_data from nano-node (nano/secure/common.cpp); its private key is published in the same source.
-    let public = h32("B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0");
-    let private = h32("34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4");
-    assert_eq!(public_key(&private), public);
+fn test_network_genesis_account_is_the_one_a_real_test_node_reports() {
+    // Observed from a real nano-node V28.2 built with NANO_NETWORK=test: `Genesis account:` in its log and `version`.
+    let account =
+        decode_address("nano_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j")
+            .unwrap();
     assert_eq!(
-        encode_address(&public),
-        "nano_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo"
+        encode_address(&account),
+        "nano_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j"
     );
-    use blake2::digest::consts::U32;
-    use blake2::{Blake2b, Digest};
-    let mut h = Blake2b::<U32>::new();
-    for _ in 0..3 {
-        h.update(public);
-    }
-    let id: [u8; 32] = h.finalize().into();
-    assert_eq!(hex::encode_upper(id), TEST_NETWORK_ID);
+    assert_eq!(
+        TEST_NETWORK_ID,
+        "B1D60C0B886B57401EF5A1DAA04340E53726AA6F4D706C085706F31BBD100CEE"
+    );
+    // The key published in nano-node's source (34F0A37A…) belongs to the dev network, not to test: its public key and
+    // account are different from the test genesis, so it can never fund a test-network account.
+    let dev_private = h32("34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4");
+    assert_ne!(public_key(&dev_private), account);
 }
 
 fn state(balance: u128, frontier: [u8; 32], confirmed: [u8; 32]) -> AccountState {

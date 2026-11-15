@@ -5,12 +5,12 @@ use crate::NanoError;
 pub const LIVE_NETWORK_ID: &str =
     "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
 
-/// Genesis block hash of the official Nano **test** network: Blake2b-256(source || representative || account) of the
-/// legacy open block built from `test_public_key_data` (`B0311EA5…B6D0`) in nano-node's `nano/secure/common.cpp`.
-/// The public test network infrastructure (test.nano.org, its peers and faucet) was retired; the identity is kept so a
-/// self-hosted node of the same network can be recognised, and it is confirmed against a running test-network node.
+/// `network_identifier` (genesis block hash) reported by a nano-node V28.2 built with `NANO_NETWORK=test` (the official
+/// test network; genesis account `nano_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j`, work thresholds
+/// identical to live). The public test network infrastructure (test.nano.org, its peers and faucet) was retired and
+/// the genesis private key is not published, so only a read-only or self-hosted node of this network can be reached.
 pub const TEST_NETWORK_ID: &str =
-    "04270D7F11C4B2B472F2854C5A59F2A7E84226CE9ED799DE75744BD7D85FC9D9";
+    "B1D60C0B886B57401EF5A1DAA04340E53726AA6F4D706C085706F31BBD100CEE";
 
 /// Network identifier reported by an official Nano V29 beta node synchronised with the public beta network.
 pub const BETA_NETWORK_ID: &str =
