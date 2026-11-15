@@ -119,6 +119,13 @@ impl NanoRpc {
         NanoNet::verify(name, id)
     }
 
+    /// Any pinned network the node serves, including the live one. Read-only use only: `NanoNet::can_sign` is false for
+    /// the live network and `submit` refuses it.
+    pub async fn network_any(&self) -> Result<NanoNet, NanoError> {
+        let (name, id) = self.identity().await?;
+        NanoNet::identify(&name, &id)
+    }
+
     /// Raw identity for read-only display (never grants signing).
     pub async fn identity(&self) -> Result<(String, String), NanoError> {
         let v = self.call(json!({"action": "version"})).await?;
@@ -270,6 +277,11 @@ impl NanoRpc {
         private: &[u8; 32],
         threads: usize,
     ) -> Result<[u8; 32], NanoError> {
+        if !net.can_sign() {
+            return Err(NanoError::Network(
+                "Nano mainnet signing and broadcasting are disabled".into(),
+            ));
+        }
         // Re-check identity at the moment of broadcast: the node may have changed since the review.
         let live = self.network().await?;
         if live != *net {

@@ -23,7 +23,7 @@ pub use keys::{
     Seed, derive_bip44_private_key, derive_private_key, public_key, sign_hash, slip10_ed25519,
     verify_hash,
 };
-pub use network::{LIVE_NETWORK_ID, NanoNet};
+pub use network::{BETA_NETWORK_ID, LIVE_NETWORK_ID, NanoNet, NetworkKind, TEST_NETWORK_ID};
 pub use rpc::{AccountState, HistoryItem, NanoRpc, Receivable, Thresholds};
 pub use wallet::{Prepared, Review, prepare_change, prepare_receive, prepare_send};
 pub use work::{Difficulty, generate_work, work_value};

@@ -106,18 +106,44 @@ fn work_generation_meets_a_low_threshold_and_fails_closed() {
 }
 
 #[test]
-fn mainnet_and_unpinned_networks_cannot_sign() {
+fn network_registry_separates_live_test_and_beta() {
+    // Mainnet is recognisable (read-only) but can never sign.
+    let live = NanoNet::identify("live", LIVE_NETWORK_ID).unwrap();
+    assert_eq!(live.kind, NetworkKind::Live);
+    assert!(!live.can_sign());
     assert!(NanoNet::verify("live", LIVE_NETWORK_ID).is_err());
+    // A node claiming a test name with the live genesis (or the reverse) is refused for signing and identification.
+    assert!(NanoNet::verify("test", LIVE_NETWORK_ID).is_err());
     assert!(NanoNet::verify("beta", LIVE_NETWORK_ID).is_err());
+    assert!(NanoNet::identify("live", TEST_NETWORK_ID).is_err());
+    assert!(NanoNet::identify("test", BETA_NETWORK_ID).is_err());
     assert!(NanoNet::verify("test", &"AB".repeat(32)).is_err());
-    assert!(NanoNet::verify("beta", &"AB".repeat(32)).is_err());
-    assert!(
-        NanoNet::verify(
-            "beta",
-            "e1227cf974c1455a8b630433d94f3ddbf495eeac9add2481a4a1d90a0d00f488"
-        )
-        .is_ok()
+    // Test and beta are separate, signing-capable identities (case-insensitive hex).
+    let test = NanoNet::verify("test", &TEST_NETWORK_ID.to_lowercase()).unwrap();
+    assert_eq!((test.kind, test.can_sign()), (NetworkKind::Test, true));
+    let beta = NanoNet::verify("beta", BETA_NETWORK_ID).unwrap();
+    assert_eq!((beta.kind, beta.can_sign()), (NetworkKind::Beta, true));
+    assert_ne!(TEST_NETWORK_ID, BETA_NETWORK_ID);
+}
+
+#[test]
+fn test_network_identity_follows_from_the_official_genesis_key() {
+    // test_public_key_data from nano-node (nano/secure/common.cpp); its private key is published in the same source.
+    let public = h32("B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0");
+    let private = h32("34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4");
+    assert_eq!(public_key(&private), public);
+    assert_eq!(
+        encode_address(&public),
+        "nano_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo"
     );
+    use blake2::digest::consts::U32;
+    use blake2::{Blake2b, Digest};
+    let mut h = Blake2b::<U32>::new();
+    for _ in 0..3 {
+        h.update(public);
+    }
+    let id: [u8; 32] = h.finalize().into();
+    assert_eq!(hex::encode_upper(id), TEST_NETWORK_ID);
 }
 
 fn state(balance: u128, frontier: [u8; 32], confirmed: [u8; 32]) -> AccountState {
