@@ -268,6 +268,18 @@ impl NanoRpc {
         Ok(v.get("confirmed").and_then(Value::as_str) == Some("true"))
     }
 
+    /// Work the node itself generates for this exact block (it knows the account epoch and so the real threshold).
+    /// Only a fallback for fresh test and dev ledgers; the work is verified by the node when the block is processed.
+    async fn node_work(&self, signed: &SignedBlock, root: &[u8; 32]) -> Result<u64, NanoError> {
+        let body = json!({"action": "work_generate", "hash": hex::encode_upper(root), "json_block": "true", "block": signed.to_json(), "use_peers": "false"});
+        let v = self.call(body).await?;
+        let work = v
+            .get("work")
+            .and_then(Value::as_str)
+            .ok_or_else(|| NanoError::Rpc("node did not return work".into()))?;
+        u64::from_str_radix(work, 16).map_err(|_| NanoError::Rpc("bad work from node".into()))
+    }
+
     /// Sign, compute proof of work at the node's current threshold, verify both locally and broadcast.
     /// The `NanoNet` argument can only exist for a verified non-live network, so this cannot target mainnet.
     pub async fn submit(
@@ -310,7 +322,21 @@ impl NanoRpc {
         signed.work = Some(work);
         signed.verify()?;
         let body = json!({"action": "process", "json_block": "true", "subtype": prepared.kind.subtype(), "block": signed.to_json()});
-        let v = self.call(body).await?;
+        let v = match self.call(body).await {
+            // A fresh account is still on epoch 0/1, whose work threshold is not the one `active_difficulty` reports
+            // (typical on new test and dev ledgers). Ask the node what it requires for this exact block, redo the
+            // proof of work locally at that difficulty and submit once more.
+            Err(NanoError::Rpc(m)) if m.contains("Block work is insufficient") => {
+                let node_work = self
+                    .node_work(&signed, &root)
+                    .await
+                    .map_err(|_| NanoError::Rpc(m))?;
+                signed.work = Some(node_work);
+                let retry = json!({"action": "process", "json_block": "true", "subtype": prepared.kind.subtype(), "block": signed.to_json()});
+                self.call(retry).await?
+            }
+            other => other?,
+        };
         let returned = hex32(&v["hash"], "hash")?;
         if returned != signed.block.hash() {
             return Err(NanoError::Rpc(
