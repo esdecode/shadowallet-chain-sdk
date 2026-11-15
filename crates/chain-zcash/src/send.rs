@@ -14,6 +14,7 @@ use zcash_client_backend::wallet::OvkPolicy;
 use zcash_keys::address::Address;
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::ShieldedPool;
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
@@ -65,6 +66,12 @@ pub fn prepare_send(
                 .map_err(|_| ZcashError::Send("the memo is longer than 512 bytes".to_owned()))?,
         ),
     };
+    let change = change_pool(
+        w.net,
+        w.db.chain_height()
+            .map_err(|e| ZcashError::Wallet(format!("{e:?}")))?
+            .ok_or_else(|| ZcashError::Send("synchronize before preparing a payment".to_owned()))?,
+    );
     let proposal = propose_standard_transfer_to_address::<Db, _, std::convert::Infallible>(
         &mut w.db,
         &params,
@@ -75,7 +82,7 @@ pub fn prepare_send(
         value,
         memo_bytes.clone(),
         None,
-        ShieldedPool::Orchard,
+        change,
         None,
         None,
     )
@@ -103,6 +110,14 @@ pub fn prepare_send(
         shielded_recipient,
         has_memo: memo_bytes.is_some(),
     })
+}
+
+fn change_pool(net: crate::ZcashNet, height: BlockHeight) -> ShieldedPool {
+    if net.params().is_nu_active(NetworkUpgrade::Nu6_3, height) {
+        ShieldedPool::Ironwood
+    } else {
+        ShieldedPool::Orchard
+    }
 }
 
 /// Create (prove and sign) the transactions of a prepared proposal and broadcast them. `seed` is the wallet seed
@@ -176,6 +191,18 @@ pub async fn sign_and_broadcast(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn post_upgrade_change_uses_the_supported_ironwood_pool() {
+        use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
+        assert_eq!(
+            super::change_pool(crate::TESTNET, BlockHeight::from_u32(4_133_999)),
+            ShieldedPool::Orchard
+        );
+        assert_eq!(
+            super::change_pool(crate::TESTNET, BlockHeight::from_u32(4_134_000)),
+            ShieldedPool::Ironwood
+        );
+    }
     #[test]
     fn official_bundled_sapling_parameters_load_with_hash_verification() {
         let _ = super::SAPLING_PROVER.verifying_keys();

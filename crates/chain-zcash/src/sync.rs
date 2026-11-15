@@ -151,6 +151,8 @@ fn store_raw_transaction(
 /// Balances in zatoshi, split by what can be spent now and what is still pending.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Balances {
+    pub ironwood_spendable: u64,
+    pub ironwood_pending: u64,
     pub orchard_spendable: u64,
     pub orchard_pending: u64,
     pub sapling_total: u64,
@@ -175,6 +177,10 @@ pub fn balances(w: &ZcashWallet) -> Result<Balances, ZcashError> {
     let p = summary.progress().scan();
     out.scan_progress_ppm = (*p.numerator() * 1_000_000 / (*p.denominator()).max(1)) as u32;
     if let Some(b) = summary.account_balances().get(&w.account) {
+        let i = b.ironwood_balance();
+        out.ironwood_spendable = u64::from(i.spendable_value());
+        out.ironwood_pending =
+            u64::from(i.change_pending_confirmation()) + u64::from(i.value_pending_spendability());
         let o = b.orchard_balance();
         out.orchard_spendable = u64::from(o.spendable_value());
         out.orchard_pending =
@@ -242,7 +248,7 @@ pub fn history(w: &ZcashWallet, limit: u32) -> Result<Vec<TxRow>, ZcashError> {
     let account_uuid = w.account.expose_uuid();
     let mut stmt = conn
         .prepare(
-            "SELECT lower(hex(txid)), mined_height, expired_unmined, account_balance_delta, fee_paid, sent_note_count, received_note_count, block_time
+            "SELECT txid, mined_height, expired_unmined, account_balance_delta, fee_paid, sent_note_count, received_note_count, block_time
              FROM v_transactions WHERE account_uuid = ?1 ORDER BY COALESCE(mined_height, 4294967295) DESC, tx_index DESC LIMIT ?2",
         )
         .map_err(wallet)?;
@@ -251,7 +257,7 @@ pub fn history(w: &ZcashWallet, limit: u32) -> Result<Vec<TxRow>, ZcashError> {
             rusqlite::params![account_uuid.as_bytes().to_vec(), limit],
             |r| {
                 Ok(TxRow {
-                    txid: r.get::<_, String>(0)?,
+                    txid: canonical_txid(&r.get::<_, Vec<u8>>(0)?)?,
                     mined_height: r.get::<_, Option<i64>>(1)?.map(|h| h as u32),
                     expired_unmined: r.get::<_, i64>(2)? != 0,
                     balance_delta: r.get(3)?,
@@ -266,10 +272,30 @@ pub fn history(w: &ZcashWallet, limit: u32) -> Result<Vec<TxRow>, ZcashError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(wallet)
 }
 
+fn canonical_txid(bytes: &[u8]) -> Result<String, rusqlite::Error> {
+    let raw: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(zcash_protocol::TxId::from_bytes(raw).to_string())
+}
+
 /// Keep the wallet's view of the chain tip current (the server's tip), needed before balances and proposals.
 pub async fn update_tip(w: &mut ZcashWallet, client: &mut Client) -> Result<u32, ZcashError> {
     let tip = crate::wallet::latest_height(client).await?;
     w.db.update_chain_tip(zcash_protocol::consensus::BlockHeight::from_u32(tip))
         .map_err(wallet)?;
     Ok(tip)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn history_ids_match_rpc_and_explorer_byte_order() {
+        let bytes: Vec<u8> = (0..32).collect();
+        assert_eq!(
+            super::canonical_txid(&bytes).unwrap(),
+            "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+        );
+        assert!(super::canonical_txid(&[0; 31]).is_err());
+    }
 }

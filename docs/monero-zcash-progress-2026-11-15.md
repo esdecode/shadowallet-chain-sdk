@@ -10,14 +10,16 @@ outstanding. Per-block state is atomic, genesis restore starts at block zero,
 ambiguous transactions retain input reservations, account/node identity is checked
 at signing, and seed-only outgoing history subtracts change and the on-chain fee.
 
-Zcash uses the official librustzcash crates, ZIP-32, Orchard/Sapling/transparent
+Zcash uses the official librustzcash crates, ZIP-32, Ironwood/Orchard/Sapling/transparent
 unified addresses, SQLite wallet state, compact-block scanning and raw transaction
-enhancement, ZIP-317 proposals, reference Orchard proving and the official
+enhancement, ZIP-317 proposals, reference Ironwood/Orchard proving and the official
 hash-verified bundled Sapling prover. There are no placeholder proofs. A restore
 without a birthday scans from Sapling activation; new-wallet tip birthdays must be
 explicit. Connection checks metadata AND the canonical Sapling activation block
 hash from https://github.com/zcash/zcash/blob/master/src/chainparams.cpp.
-Only the exact canonical TESTNET profile can sign or broadcast.
+Only the exact canonical TESTNET profile can sign or broadcast. Ironwood balances
+are exposed separately and post-NU6.3 change uses Ironwood. Transaction identifiers
+from the SQLite view are rendered in canonical RPC/explorer byte order.
 
 The Zcash rusqlite 0.37 compatibility patch is documented in
 vendor/rusqlite/SHADOWALLET-PATCH.md. It is temporary and requires independent
