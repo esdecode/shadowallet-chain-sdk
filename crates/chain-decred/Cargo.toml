@@ -1,0 +1,31 @@
+[package]
+name = "shadowallet-chain-decred"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Decred (DCR) wallet: dcrd-compatible HD derivation, P2PKH addresses, dcrd RPC scanning, BLAKE-256 signature hash signing, fee-aware spends. Not Bitcoin signing."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["decred", "dcr", "wallet", "blake256"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+# Young, single-maintainer, unaudited crate (28 downloads at selection time): pinned exactly and validated against a real dcrd node.
+dcr-rs = { version = "=0.6.3", default-features = false, features = ["std"] }
+hex.workspace = true
+thiserror.workspace = true
+zeroize = "1"
+serde_json.workspace = true
+reqwest = { workspace = true }
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+hex.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

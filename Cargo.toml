@@ -14,6 +14,7 @@ members = [
     "crates/chain-monero",
     "crates/chain-zcash",
     "crates/chain-nano",
+    "crates/chain-decred",
     "vendor/monero-ed25519",
 ]
 
