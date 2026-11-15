@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/rusqlite"]
 members = [
     "crates/chain-core",
     "crates/chain-utxo",
@@ -11,6 +12,7 @@ members = [
     "crates/chain-solana",
     "crates/chain-tron",
     "crates/chain-monero",
+    "crates/chain-zcash",
     "vendor/monero-ed25519",
 ]
 
@@ -58,3 +60,6 @@ panic = "deny"
 # Point::biased_hash, ported to crypto-bigint 0.7 and checked against 4000 vectors of the original.
 [patch.crates-io]
 monero-ed25519 = { path = "vendor/monero-ed25519" }
+# RUSTSEC-2026-0459: zcash_client_sqlite pins rusqlite 0.37, whose libsqlite3-sys 0.35 bundles a vulnerable SQLite.
+# The vendored rusqlite 0.37.0 is unmodified except for its libsqlite3-sys requirement (0.39 = bundled SQLite 3.54.1).
+rusqlite = { path = "vendor/rusqlite" }

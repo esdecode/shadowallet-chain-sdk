@@ -90,9 +90,13 @@ impl MoneroStore {
                     .execute("INSERT INTO xmr_meta(k,v) VALUES('account',?1)", [&want])
                     .map_err(db)?;
                 self.set_meta("restore_height", &restore_height.to_string())?;
+                self.set_meta("last_issued_subaddress", "0")?;
                 self.set_meta(
                     "scanned_height",
-                    &restore_height.saturating_sub(1).to_string(),
+                    &(i64::try_from(restore_height).map_err(|_| {
+                        MoneroError::Store("restore height is too large".to_owned())
+                    })? - 1)
+                        .to_string(),
                 )?;
                 Ok(())
             }
@@ -111,6 +115,52 @@ impl MoneroStore {
             )
             .map_err(db)?;
         Ok(())
+    }
+
+    /// Legacy wallets could display indexes 1..=20 without persisting them. Treat
+    /// all of these as issued during migration, so a restart never reuses one.
+    pub fn last_issued_subaddress(&self) -> Result<u32, MoneroError> {
+        let value = self.meta("last_issued_subaddress")?;
+        match value {
+            None => Ok(20),
+            Some(v) => v
+                .parse::<u32>()
+                .ok()
+                .filter(|i| *i <= 10_000)
+                .ok_or_else(|| MoneroError::Store("invalid subaddress high-water mark".to_owned())),
+        }
+    }
+
+    pub fn watch_subaddress(&self, index: u32) -> Result<(), MoneroError> {
+        if index > 10_000 {
+            return Err(MoneroError::Store(
+                "subaddress index exceeds the supported 10000".to_owned(),
+            ));
+        }
+        let high = self.last_issued_subaddress()?.max(index);
+        self.set_meta("last_issued_subaddress", &high.to_string())
+    }
+
+    /// Allocate and persist before displaying the address. A crash can skip an
+    /// index, but must never cause an already displayed address to be reissued.
+    pub fn next_subaddress(&self) -> Result<u32, MoneroError> {
+        self.apply_block(|| {
+            let next = self.last_issued_subaddress()? + 1;
+            self.watch_subaddress(next)?;
+            Ok(next)
+        })
+    }
+
+    /// Commit all changes for one scanned block together. An interrupted or failed scan
+    /// must not leave deduplicated outputs behind without their history/checkpoint.
+    pub(crate) fn apply_block<T>(
+        &self,
+        apply: impl FnOnce() -> Result<T, MoneroError>,
+    ) -> Result<T, MoneroError> {
+        let transaction = self.conn.unchecked_transaction().map_err(db)?;
+        let result = apply()?;
+        transaction.commit().map_err(db)?;
+        Ok(result)
     }
 
     pub fn meta(&self, k: &str) -> Result<Option<String>, MoneroError> {
@@ -308,7 +358,7 @@ impl MoneroStore {
         // spends confirmed above the fork are undone: outputs become unspent again (the tx may be re-mined)
         self.conn
             .execute(
-                "UPDATE xmr_output SET spent_in=NULL WHERE spent_in IN (SELECT txid FROM xmr_tx WHERE height > ?1)",
+                "UPDATE xmr_output SET spent_in=NULL, reserved=1 WHERE spent_in IN (SELECT txid FROM xmr_tx WHERE height > ?1)",
                 [h],
             )
             .map_err(db)?;
@@ -330,6 +380,34 @@ impl MoneroStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn receive_subaddresses_never_repeat_after_restart_or_legacy_migration() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("addresses.sqlite");
+        let store = MoneroStore::open(&path).unwrap();
+        store
+            .register_account("monero-stagenet", "primary", 0)
+            .unwrap();
+        for index in 1..=25 {
+            assert_eq!(store.next_subaddress().unwrap(), index);
+        }
+        drop(store);
+        let store = MoneroStore::open(&path).unwrap();
+        assert_eq!(store.next_subaddress().unwrap(), 26);
+        store.watch_subaddress(50).unwrap();
+        assert_eq!(store.next_subaddress().unwrap(), 51);
+        assert!(store.watch_subaddress(10_001).is_err());
+        store
+            .conn
+            .execute("DELETE FROM xmr_meta WHERE k='last_issued_subaddress'", [])
+            .unwrap();
+        assert_eq!(
+            store.next_subaddress().unwrap(),
+            21,
+            "legacy displayed addresses are not reused"
+        );
+    }
+
     fn out(n: u8, height: u64) -> OwnedOutput {
         OwnedOutput {
             id: 0,
@@ -344,6 +422,57 @@ mod tests {
             spent_in: None,
             reserved: false,
         }
+    }
+
+    #[test]
+    fn genesis_restore_and_failed_block_are_recoverable_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restore.db");
+        let store = MoneroStore::open(&path).unwrap();
+        store
+            .register_account("monero-stagenet", "5abc", 0)
+            .unwrap();
+        assert_eq!(
+            store.scanned_height().unwrap(),
+            -1,
+            "genesis must be scanned"
+        );
+        let failed: Result<(), MoneroError> = store.apply_block(|| {
+            store.add_output(&out(1, 2))?;
+            store.record_block(2, &[2; 32])?;
+            store.set_scanned(2)?;
+            Err(MoneroError::Scan(
+                "interrupted before history was written".into(),
+            ))
+        });
+        assert!(failed.is_err());
+        drop(store);
+        let store = MoneroStore::open(&path).unwrap();
+        assert!(store.outputs().unwrap().is_empty());
+        assert!(store.block_hash(2).unwrap().is_none());
+        assert_eq!(store.scanned_height().unwrap(), -1);
+        store
+            .apply_block(|| {
+                assert!(store.add_output(&out(1, 2))?);
+                store.upsert_tx(&TxRecord {
+                    txid: [1; 32],
+                    direction: "in".into(),
+                    amount: 1_000_000_000_000,
+                    fee: 0,
+                    height: Some(2),
+                    status: "confirmed".into(),
+                    counterparty: None,
+                    created_ms: 0,
+                })?;
+                store.record_block(2, &[2; 32])?;
+                store.set_scanned(2)
+            })
+            .unwrap();
+        drop(store);
+        let reopened = MoneroStore::open(&path).unwrap();
+        assert_eq!(reopened.outputs().unwrap().len(), 1);
+        assert_eq!(reopened.history(10).unwrap().len(), 1);
+        assert_eq!(reopened.scanned_height().unwrap(), 2);
     }
 
     #[test]
@@ -385,6 +514,10 @@ mod tests {
         let outs = s.outputs().unwrap();
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].spent_in, None);
+        assert!(
+            outs[0].reserved,
+            "a reorged signed spend must remain reserved"
+        );
         assert_eq!(s.scanned_height().unwrap(), 125);
         assert_eq!(s.history(10).unwrap()[0].status, "pending");
         drop(s);

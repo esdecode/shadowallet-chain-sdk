@@ -7,10 +7,8 @@ use monero_wallet::{
     Scanner,
     address::SubaddressIndex,
     block::Block,
-    interface::{
-        ProvidesBlockchain, ProvidesBlockchainMeta, ProvidesScannableBlocks, ProvidesTransactions,
-    },
-    transaction::Input,
+    interface::{ProvidesBlockchain, ProvidesBlockchainMeta, ProvidesScannableBlocks},
+    transaction::{Input, Transaction},
 };
 
 use crate::{
@@ -117,6 +115,9 @@ pub async fn sync(
     node: &Node,
     max_blocks: usize,
 ) -> Result<SyncReport, MoneroError> {
+    if max_blocks == 0 {
+        return Err(MoneroError::Scan("max_blocks must be positive".to_owned()));
+    }
     let tip = node.daemon.latest_block_number().await.map_err(node_err)? as u64;
     store.set_meta("tip", &tip.to_string())?;
     let reorg_depth = check_reorg(store, node).await?;
@@ -139,7 +140,10 @@ pub async fn sync(
         .map(|o| (o.key_image, o.amount))
         .collect();
     let mut scanner = Scanner::new(account.view_pair().clone());
-    for i in 1..=20u32 {
+    // Watch every issued address and a recovery lookahead. Never silently stop
+    // at the twentieth address once additional receive addresses are issued.
+    let watched_end = store.last_issued_subaddress()?.saturating_add(200).max(200);
+    for i in 1..=watched_end {
         if let Some(index) = SubaddressIndex::new(0, i) {
             scanner.register_subaddress(index);
         }
@@ -154,84 +158,109 @@ pub async fn sync(
             .await
             .map_err(node_err)?;
         for block in blocks {
-            let number = block.block.number() as u64;
-            let hash = block.block.hash();
-            // 1. spends: any input whose key image belongs to one of our outputs
-            let mut spent_value: HashMap<[u8; 32], u64> = HashMap::new();
-            for (txid, tx) in block
-                .block
-                .transactions
-                .iter()
-                .zip(block.transactions.iter())
-            {
-                for input in &tx.prefix().inputs {
-                    if let Input::ToKey { key_image, .. } = input {
-                        let ki = key_image.to_bytes();
-                        if let Some(amount) = owned.remove(&ki)
-                            && store.mark_spent(&ki, txid)?
-                        {
-                            *spent_value.entry(*txid).or_default() += amount;
-                            report.spent_outputs += 1;
+            store.apply_block(|| {
+                let number = block.block.number() as u64;
+                let hash = block.block.hash();
+                // 1. spends: any input whose key image belongs to one of our outputs
+                let mut spent_value: HashMap<[u8; 32], u64> = HashMap::new();
+                let mut fees: HashMap<[u8; 32], u64> = HashMap::new();
+                for (txid, tx) in block
+                    .block
+                    .transactions
+                    .iter()
+                    .zip(block.transactions.iter())
+                {
+                    if let Transaction::V2 {
+                        proofs: Some(proofs),
+                        ..
+                    } = tx
+                    {
+                        fees.insert(*txid, proofs.base.fee);
+                    }
+                    for input in &tx.prefix().inputs {
+                        if let Input::ToKey { key_image, .. } = input {
+                            let ki = key_image.to_bytes();
+                            if let Some(amount) = owned.remove(&ki)
+                                && store.mark_spent(&ki, txid)?
+                            {
+                                *spent_value.entry(*txid).or_default() += amount;
+                                report.spent_outputs += 1;
+                            }
                         }
                     }
                 }
-            }
-            for (txid, gross) in spent_value {
-                store.upsert_tx(&TxRecord {
-                    txid,
-                    direction: "out".to_owned(),
-                    amount: gross,
-                    fee: 0,
-                    height: Some(number),
-                    status: "confirmed".to_owned(),
-                    counterparty: None,
-                    created_ms: 0,
-                })?;
-                store.set_tx_status(&txid, "confirmed", Some(number))?;
-            }
-            // 2. receipts
-            let found = scanner
-                .scan(block)
-                .map_err(|e| MoneroError::Scan(format!("{e:?}")))?
-                .ignore_additional_timelock();
-            let mut received: HashMap<[u8; 32], u64> = HashMap::new();
-            for out in found {
-                let key_image = account.key_image(out.key_offset(), out.key());
-                let amount = out.commitment().amount;
-                let owned_output = OwnedOutput {
-                    id: 0,
-                    txid: out.transaction(),
-                    index_in_tx: out.index_in_transaction(),
-                    amount,
-                    height: number,
-                    key_image,
-                    subaddress: out.subaddress().map(|s| (s.account(), s.address())),
-                    timelock_height: timelock_height(out.additional_timelock()),
-                    blob: out.serialize(),
-                    spent_in: None,
-                    reserved: false,
-                };
-                if store.add_output(&owned_output)? {
-                    report.new_outputs += 1;
-                    owned.insert(owned_output.key_image, amount);
-                    *received.entry(owned_output.txid).or_default() += amount;
+                // 2. receipts
+                let found = scanner
+                    .scan(block)
+                    .map_err(|e| MoneroError::Scan(format!("{e:?}")))?
+                    .ignore_additional_timelock();
+                let mut received: HashMap<[u8; 32], u64> = HashMap::new();
+                for out in found {
+                    let key_image = account.key_image(out.key_offset(), out.key());
+                    let amount = out.commitment().amount;
+                    if let Some(sub) = out.subaddress() {
+                        store.watch_subaddress(sub.address())?;
+                    }
+                    let owned_output = OwnedOutput {
+                        id: 0,
+                        txid: out.transaction(),
+                        index_in_tx: out.index_in_transaction(),
+                        amount,
+                        height: number,
+                        key_image,
+                        subaddress: out.subaddress().map(|s| (s.account(), s.address())),
+                        timelock_height: timelock_height(out.additional_timelock()),
+                        blob: out.serialize(),
+                        spent_in: None,
+                        reserved: false,
+                    };
+                    if store.add_output(&owned_output)? {
+                        report.new_outputs += 1;
+                        owned.insert(owned_output.key_image, amount);
+                        *received.entry(owned_output.txid).or_default() += amount;
+                    }
                 }
-            }
-            for (txid, amount) in received {
-                store.upsert_tx(&TxRecord {
-                    txid,
-                    direction: "in".to_owned(),
-                    amount,
-                    fee: 0,
-                    height: Some(number),
-                    status: "confirmed".to_owned(),
-                    counterparty: None,
-                    created_ms: 0,
-                })?;
-            }
-            store.record_block(number, &hash)?;
-            store.set_scanned(number)?;
-            report.to = number;
+                // On seed-only recovery there is no saved send proposal. Reconstruct
+                // net sent value from owned inputs minus change and the on-chain fee,
+                // instead of displaying the entire selected input value as the payment.
+                for (txid, gross) in spent_value {
+                    let change = received.remove(&txid).unwrap_or(0);
+                    let fee = fees.get(&txid).copied().unwrap_or(0);
+                    let amount = gross
+                        .checked_sub(change)
+                        .and_then(|v| v.checked_sub(fee))
+                        .ok_or_else(|| {
+                            MoneroError::Scan("invalid outgoing value accounting".to_owned())
+                        })?;
+                    store.upsert_tx(&TxRecord {
+                        txid,
+                        direction: "out".to_owned(),
+                        amount,
+                        fee,
+                        height: Some(number),
+                        status: "confirmed".to_owned(),
+                        counterparty: None,
+                        created_ms: 0,
+                    })?;
+                    store.set_tx_status(&txid, "confirmed", Some(number))?;
+                }
+                for (txid, amount) in received {
+                    store.upsert_tx(&TxRecord {
+                        txid,
+                        direction: "in".to_owned(),
+                        amount,
+                        fee: 0,
+                        height: Some(number),
+                        status: "confirmed".to_owned(),
+                        counterparty: None,
+                        created_ms: 0,
+                    })?;
+                }
+                store.record_block(number, &hash)?;
+                store.set_scanned(number)?;
+                report.to = number;
+                Ok(())
+            })?;
         }
         next = upper + 1;
     }
@@ -260,28 +289,15 @@ pub fn balance(store: &MoneroStore) -> Result<Balance, MoneroError> {
     Ok(b)
 }
 
-/// Settle outgoing transactions that never confirmed. A transaction the node no longer knows after `max_age_ms`
-/// is marked failed and its outputs are released for spending again.
+/// Retained for compatibility: an absent transaction or a node error is NOT proof
+/// that a signed transaction cannot still confirm. Pending inputs stay reserved
+/// until their key images are observed on chain. Never release all wallet outputs
+/// because one untrusted node failed to return a transaction.
 pub async fn reconcile_pending(
-    store: &MoneroStore,
-    node: &Node,
-    now_ms: u64,
-    max_age_ms: u64,
+    _store: &MoneroStore,
+    _node: &Node,
+    _now_ms: u64,
+    _max_age_ms: u64,
 ) -> Result<u32, MoneroError> {
-    let mut released = 0;
-    for rec in store
-        .history(200)?
-        .into_iter()
-        .filter(|r| r.direction == "out" && r.status == "pending")
-    {
-        if now_ms.saturating_sub(rec.created_ms) < max_age_ms {
-            continue;
-        }
-        if node.daemon.transaction(rec.txid).await.is_err() {
-            store.set_tx_status(&rec.txid, "failed", None)?;
-            store.unreserve_all()?;
-            released += 1;
-        }
-    }
-    Ok(released)
+    Ok(0)
 }

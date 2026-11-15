@@ -52,8 +52,13 @@ pub async fn prepare_send(
     priority: FeePriority,
     only_outputs: Option<&[i64]>,
 ) -> Result<PreparedSend, MoneroError> {
-    if node.net.is_mainnet {
+    if node.net.is_mainnet || account.network == monero_wallet::address::Network::Mainnet {
         return Err(MoneroError::Send("mainnet signing is disabled".to_owned()));
+    }
+    if account.network != node.net.network {
+        return Err(MoneroError::Network(
+            "account and node networks differ".to_owned(),
+        ));
     }
     if amount == 0 {
         return Err(MoneroError::Send(
@@ -176,8 +181,13 @@ pub fn sign_prepared(
     node: &Node,
     prepared: PreparedSend,
 ) -> Result<Transaction, MoneroError> {
-    if node.net.is_mainnet {
+    if node.net.is_mainnet || account.network == monero_wallet::address::Network::Mainnet {
         return Err(MoneroError::Send("mainnet signing is disabled".to_owned()));
+    }
+    if account.network != node.net.network {
+        return Err(MoneroError::Network(
+            "account and node networks differ".to_owned(),
+        ));
     }
     prepared
         .signable
@@ -196,6 +206,11 @@ pub async fn publish_signed(
     fee: u64,
     now_ms: u64,
 ) -> Result<[u8; 32], MoneroError> {
+    if node.net.is_mainnet || node.net.network == monero_wallet::address::Network::Mainnet {
+        return Err(MoneroError::Send(
+            "mainnet broadcasting is disabled".to_owned(),
+        ));
+    }
     let txid = tx.hash();
     store.upsert_tx(&TxRecord {
         txid,

@@ -1,0 +1,42 @@
+[package]
+name = "shadowallet-chain-zcash"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Zcash (Orchard and transparent) wallet on the official librustzcash stack: ZIP-32 accounts, unified addresses, compact-block sync, ZIP-317 fees, shielded sends."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["zcash", "orchard", "shielded", "wallet"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+zcash_client_backend = { version = "0.25", default-features = false, features = ["lightwalletd-tonic", "lightwalletd-tonic-tls-webpki-roots", "orchard", "transparent-inputs", "sync", "zeroize"] }
+zcash_client_sqlite = { version = "0.23", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs", "zeroize"] }
+zcash_proofs = { version = "0.31", default-features = false, features = ["bundled-prover"] }
+zcash_protocol = { version = "0.11", default-features = false }
+zcash_primitives = { version = "0.31", default-features = false }
+zcash_address = { version = "0.14", default-features = false }
+zip32 = { version = "0.3", default-features = false }
+secrecy = "0.8"
+hex.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+rand = { version = "0.10", default-features = false, features = ["sys_rng"] }
+rand_core = { version = "0.10", default-features = false }
+zeroize = "1"
+async-trait = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "tls-webpki-roots"] }
+# Only librustzcash still needs 0.37. Other SDK chains retain maintained rusqlite 0.41.
+# The root patch changes its SQLite binding to the same patched 0.39 used by 0.41.
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+
+[dev-dependencies]
+bip39 = "2"
+tempfile = "3"
+
+[lints]
+workspace = true
