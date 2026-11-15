@@ -83,3 +83,35 @@ pub fn verify_hash(
     raw_verify::<Blake2b512>(&vk, hash, &Signature::from_bytes(signature))
         .map_err(|_| NanoError::Signature)
 }
+
+/// BIP-39 route used by Ledger, Nault and Cake Wallet: SLIP-0010 Ed25519 (hardened only) at `m/44'/165'/index'`.
+/// The 32-byte leaf is used directly as the Nano private key. `bip39_seed` is the 64-byte BIP-39 seed.
+pub fn derive_bip44_private_key(bip39_seed: &[u8], index: u32) -> Result<[u8; 32], NanoError> {
+    if index >= 0x8000_0000 {
+        return Err(NanoError::Seed("account index must be below 2^31".into()));
+    }
+    slip10_ed25519(bip39_seed, &[44, 165, index])
+}
+
+/// SLIP-0010 Ed25519 derivation of an arbitrary hardened path (used to check the implementation against the
+/// official SLIP-0010 test vectors).
+pub fn slip10_ed25519(seed: &[u8], hardened_path: &[u32]) -> Result<[u8; 32], NanoError> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+    let mut mac = Hmac::<Sha512>::new_from_slice(b"ed25519 seed")
+        .map_err(|_| NanoError::Seed("hmac key".into()))?;
+    mac.update(seed);
+    let mut node: [u8; 64] = mac.finalize().into_bytes().into();
+    for child in hardened_path {
+        let mut data = vec![0u8];
+        data.extend_from_slice(&node[..32]);
+        data.extend_from_slice(&(child | 0x8000_0000).to_be_bytes());
+        let mut mac = Hmac::<Sha512>::new_from_slice(&node[32..])
+            .map_err(|_| NanoError::Seed("hmac key".into()))?;
+        mac.update(&data);
+        node = mac.finalize().into_bytes().into();
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&node[..32]);
+    Ok(out)
+}

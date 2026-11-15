@@ -181,3 +181,31 @@ fn block_construction_rules() {
         (100, [7; 32], [0; 32])
     );
 }
+
+#[test]
+fn slip10_ed25519_official_vectors() {
+    // SLIP-0010 test vector 1 for ed25519 (seed 000102030405060708090a0b0c0d0e0f).
+    let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
+    assert_eq!(
+        hex::encode(slip10_ed25519(&seed, &[]).unwrap()),
+        "2b4be7f19ee27bbf30c667b642d5f4aa69fd169872f8fc3059c08ebae2eb19e7"
+    );
+    assert_eq!(
+        hex::encode(slip10_ed25519(&seed, &[0]).unwrap()),
+        "68e0fe46dfb67e368c75379acec591dad19df3cde26e63b93a8e704f1dade7a3"
+    );
+    assert_eq!(
+        hex::encode(slip10_ed25519(&seed, &[0, 1]).unwrap()),
+        "b1d0bad404bf35da785a64ca1ac54b2617211d2777696fbffaf208f746ae84f2"
+    );
+}
+
+#[test]
+fn bip44_route_is_deterministic_and_index_separated() {
+    let seed = [7u8; 64];
+    let a = derive_bip44_private_key(&seed, 0).unwrap();
+    assert_eq!(a, derive_bip44_private_key(&seed, 0).unwrap());
+    assert_ne!(a, derive_bip44_private_key(&seed, 1).unwrap());
+    assert_eq!(a, slip10_ed25519(&seed, &[44, 165, 0]).unwrap());
+    assert!(derive_bip44_private_key(&seed, 0x8000_0000).is_err());
+}

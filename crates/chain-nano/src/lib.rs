@@ -19,7 +19,10 @@ mod work;
 pub use address::{decode_address, encode_address};
 pub use amount::{RAW_PER_XNO, format_xno, parse_xno};
 pub use block::{BlockKind, SignedBlock, StateBlock};
-pub use keys::{Seed, derive_private_key, public_key, sign_hash, verify_hash};
+pub use keys::{
+    Seed, derive_bip44_private_key, derive_private_key, public_key, sign_hash, slip10_ed25519,
+    verify_hash,
+};
 pub use network::{LIVE_NETWORK_ID, NanoNet};
 pub use rpc::{AccountState, HistoryItem, NanoRpc, Receivable, Thresholds};
 pub use wallet::{Prepared, Review, prepare_change, prepare_receive, prepare_send};
