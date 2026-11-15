@@ -13,6 +13,7 @@ members = [
     "crates/chain-tron",
     "crates/chain-monero",
     "crates/chain-zcash",
+    "crates/chain-nano",
     "vendor/monero-ed25519",
 ]
 

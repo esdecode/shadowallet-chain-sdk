@@ -1,0 +1,30 @@
+[package]
+name = "shadowallet-chain-nano"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Nano (XNO) account-chain wallet: seed and index derivation, nano_ addresses, state blocks, proof of work, Blake2b-Ed25519 signing and node RPC. Not a UTXO model."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["nano", "xno", "wallet", "block-lattice"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+blake2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["hazmat", "std"] }
+getrandom.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+zeroize = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+blake2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true
