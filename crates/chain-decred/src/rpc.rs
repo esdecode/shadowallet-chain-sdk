@@ -25,10 +25,10 @@ impl DcrdRpc {
     ) -> Result<Self, DecredError> {
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(60));
         if let Some(pem) = ca_pem {
-            let der = pem_to_der(pem)?;
+            let pin = parse_pin(pem)?;
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let verifier = Arc::new(PinnedCert {
-                der,
+                pin,
                 provider: provider.clone(),
             });
             let config = rustls::ClientConfig::builder_with_provider(provider)
@@ -153,7 +153,7 @@ impl DcrdRpc {
 /// Handshake signatures are still verified against the pinned certificate's key.
 #[derive(Debug)]
 struct PinnedCert {
-    der: Vec<u8>,
+    pin: Pin,
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
@@ -166,7 +166,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCert {
         _ocsp: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        if end_entity.as_ref() == self.der.as_slice() {
+        if self.pin.matches(end_entity.as_ref()) {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::InvalidCertificate(
@@ -222,7 +222,83 @@ fn pem_to_der(pem: &[u8]) -> Result<Vec<u8>, DecredError> {
         .take_while(|l| !l.starts_with("-----END CERTIFICATE-----"))
         .map(str::trim)
         .collect();
-    base64::engine::general_purpose::STANDARD
+    let der = base64::engine::general_purpose::STANDARD
         .decode(body)
-        .map_err(|_| DecredError::Rpc("rpc.cert is not valid PEM".into()))
+        .map_err(|_| DecredError::Rpc("rpc.cert is not valid PEM".into()))?;
+    if der.is_empty() {
+        return Err(DecredError::Rpc(
+            "rpc.cert is neither a PEM certificate nor a SHA-256 fingerprint".into(),
+        ));
+    }
+    Ok(der)
+}
+
+/// What identifies the node's certificate: its full DER (from the PEM `rpc.cert`) or its SHA-256 fingerprint.
+#[derive(Debug, PartialEq, Eq)]
+enum Pin {
+    Der(Vec<u8>),
+    Sha256([u8; 32]),
+}
+
+impl Pin {
+    fn matches(&self, der: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        match self {
+            Pin::Der(expected) => expected.as_slice() == der,
+            Pin::Sha256(expected) => Sha256::digest(der).as_slice() == expected.as_slice(),
+        }
+    }
+}
+
+/// Accepts a PEM certificate or a SHA-256 fingerprint (64 hex digits, optionally separated by `:` or spaces).
+fn parse_pin(input: &[u8]) -> Result<Pin, DecredError> {
+    let text =
+        std::str::from_utf8(input).map_err(|_| DecredError::Rpc("rpc.cert is not text".into()))?;
+    let compact: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect();
+    if compact.len() == 64 && compact.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(&compact, &mut out)
+            .map_err(|_| DecredError::Rpc("bad certificate fingerprint".into()))?;
+        return Ok(Pin::Sha256(out));
+    }
+    Ok(Pin::Der(pem_to_der(input)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_and_pem_pins() {
+        let der = vec![1u8, 2, 3, 4];
+        let digest = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&der))
+        };
+        let fp = parse_pin(digest.as_bytes()).unwrap();
+        assert!(fp.matches(&der));
+        assert!(!fp.matches(&[1, 2, 3, 5]));
+        let spaced: String = digest
+            .as_bytes()
+            .chunks(2)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(parse_pin(spaced.as_bytes()).unwrap(), fp);
+        use base64::Engine as _;
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----
+{}
+-----END CERTIFICATE-----
+",
+            base64::engine::general_purpose::STANDARD.encode(&der)
+        );
+        let pinned = parse_pin(pem.as_bytes()).unwrap();
+        assert_eq!(pinned, Pin::Der(der.clone()));
+        assert!(pinned.matches(&der));
+        assert!(parse_pin(b"not a certificate").is_err());
+    }
 }
