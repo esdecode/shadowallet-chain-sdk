@@ -128,10 +128,14 @@ mod lifecycle {
         )
     }
 
+    /// Opened read-write exactly as the wallet does, so SQLite's own crash recovery rolls back a hot journal left by a
+    /// hard kill (a read-only connection cannot, and reports SQLITE_READONLY_ROLLBACK).
     fn integrity_ok(path: &std::path::Path) -> bool {
-        let conn =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
         let answer: String = conn
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
@@ -340,7 +344,26 @@ mod lifecycle {
         let victim = dir.path().join("victim.sqlite");
         let exe = std::env::current_exe().unwrap();
         let mut last = 0u32;
-        for (i, wait_ms) in [3000u64, 2000, 4500].into_iter().enumerate() {
+        // ZEC_KILLS=N runs N hard kills with a deterministic pseudo-random wait (including very short ones that land in
+        // the open/migration path and long ones that land in scan commits). Default: the three fixed waits.
+        let waits: Vec<u64> = match std::env::var("ZEC_KILLS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            Some(n) => {
+                let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+                (0..n)
+                    .map(|_| {
+                        x = x
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
+                        150 + (x >> 33) % 4850
+                    })
+                    .collect()
+            }
+            None => vec![3000u64, 2000, 4500],
+        };
+        for (i, wait_ms) in waits.into_iter().enumerate() {
             let mut child = Command::new(&exe)
                 .args([
                     "--ignored",
