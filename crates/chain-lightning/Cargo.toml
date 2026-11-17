@@ -1,0 +1,28 @@
+[package]
+name = "shadowallet-chain-lightning"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Lightning foundation: BOLT11 invoice parsing with network isolation, node identity from LDK's KeysManager, and a stale-state-safe channel-monitor store. No channels, payments or chain access."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["lightning", "ldk", "wallet"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+# Stable releases of the maintained Lightning Development Kit, pinned exactly.
+lightning = { version = "=0.2.8", default-features = false, features = ["std"] }
+lightning-invoice = { version = "=0.34.2", default-features = false, features = ["std"] }
+hkdf = "0.12"
+sha2.workspace = true
+zeroize = "1"
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
