@@ -1,6 +1,7 @@
 //! Node connection (genesis identity verified), block scanning, spend detection and reorg rollback.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use monero_wallet::transaction::Timelock;
 use monero_wallet::{
@@ -31,6 +32,8 @@ pub struct SyncReport {
     pub new_outputs: u32,
     pub spent_outputs: u32,
     pub reorg_depth: u32,
+    /// The caller asked to stop: the scan ended at a block boundary and `to` is the last block that was committed.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,6 +43,9 @@ pub struct Balance {
     pub locked: u64,
     pub spendable_outputs: u32,
 }
+
+/// Attempts to fetch one batch of blocks before the error is reported to the caller.
+const FETCH_ATTEMPTS: u32 = 4;
 
 fn node_err(e: impl std::fmt::Debug) -> MoneroError {
     MoneroError::Node(format!("{e:?}"))
@@ -115,6 +121,20 @@ pub async fn sync(
     node: &Node,
     max_blocks: usize,
 ) -> Result<SyncReport, MoneroError> {
+    sync_cancellable(store, account, node, max_blocks, &AtomicBool::new(false)).await
+}
+
+/// Like [`sync`], but cooperative: `cancel` is polled before every batch request and after every committed block. A
+/// block is applied in one SQLite transaction together with its checkpoint, so a cancel (or a killed process) can only
+/// ever lose the block that was being applied; the next call resumes at `scanned_height + 1`. Nothing is interrupted
+/// in the middle of a block and no thread is terminated.
+pub async fn sync_cancellable(
+    store: &MoneroStore,
+    account: &MoneroAccount,
+    node: &Node,
+    max_blocks: usize,
+    cancel: &AtomicBool,
+) -> Result<SyncReport, MoneroError> {
     if max_blocks == 0 {
         return Err(MoneroError::Scan("max_blocks must be positive".to_owned()));
     }
@@ -151,12 +171,34 @@ pub async fn sync(
     let end = tip.min(start + max_blocks as u64 - 1);
     let mut next = start;
     while next <= end {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            return Ok(report);
+        }
         let upper = end.min(next + 19);
-        let blocks = node
-            .daemon
-            .contiguous_scannable_blocks(next as usize..=upper as usize)
-            .await
-            .map_err(node_err)?;
+        // Fetching is read-only and idempotent, so a flaky node is retried a few times with a growing pause; nothing
+        // has been written for these blocks yet. After the last attempt the error is returned and the checkpoint
+        // (every block before `next` is already committed) stays valid for the next call.
+        let mut attempt = 0u32;
+        let blocks = loop {
+            match node
+                .daemon
+                .contiguous_scannable_blocks(next as usize..=upper as usize)
+                .await
+            {
+                Ok(blocks) => break blocks,
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= FETCH_ATTEMPTS || cancel.load(Ordering::Relaxed) {
+                        return Err(node_err(error));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        500 * u64::from(attempt) * u64::from(attempt),
+                    ))
+                    .await;
+                }
+            }
+        };
         for block in blocks {
             store.apply_block(|| {
                 let number = block.block.number() as u64;
@@ -261,6 +303,10 @@ pub async fn sync(
                 report.to = number;
                 Ok(())
             })?;
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                return Ok(report);
+            }
         }
         next = upper + 1;
     }

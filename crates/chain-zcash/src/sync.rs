@@ -1,5 +1,9 @@
 //! Synchronization, balances, addresses and history.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::sync::Notify;
 use zcash_client_backend::data_api::{WalletRead, WalletWrite, wallet::ConfirmationsPolicy};
 
 use crate::wallet::{Client, MemBlockCache};
@@ -16,24 +20,106 @@ pub async fn sync(
     client: &mut Client,
     batch_size: u32,
 ) -> Result<(), ZcashError> {
+    sync_cancellable(w, client, batch_size, &CancelToken::new())
+        .await
+        .map(|_| ())
+}
+
+/// Cooperative cancellation of a running [`sync_cancellable`]. Cheap to clone; every clone controls the same flag, so
+/// the token can live outside any lock that the running scan holds.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<TokenInner>);
+
+#[derive(Debug, Default)]
+struct TokenInner {
+    flag: AtomicBool,
+    wake: Notify,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the scan to stop at its next safe boundary. Never interrupts anything by itself.
+    pub fn cancel(&self) {
+        self.0.flag.store(true, Ordering::SeqCst);
+        self.0.wake.notify_waiters();
+    }
+
+    /// Arm the token for a new scan.
+    pub fn reset(&self) {
+        self.0.flag.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.flag.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once `cancel` has been called (immediately if it already was).
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.0.wake.notified();
+            tokio::pin!(notified);
+            // Register interest before the flag check, so a `cancel` between the two cannot be missed.
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// How a [`sync_cancellable`] call ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// The wallet reached the server's tip (including the requested transaction enhancement).
+    Complete,
+    /// The caller asked to stop. Everything scanned so far is committed; the next call continues from it.
+    Cancelled,
+}
+
+/// Like [`sync`], but stops when `cancel` is triggered. Safe by construction, nothing is terminated:
+///  * the scan only waits on the network at `await` points; all wallet-database work (`scan_cached_blocks`, subtree
+///    roots, chain tip, rewinds) is synchronous and runs to completion in one SQLite transaction, so a cancel can only
+///    take effect between two such steps and never in the middle of one;
+///  * blocks that were downloaded but not yet scanned live in an in-memory cache and are simply fetched again;
+///  * the verified scan checkpoint (`fully_scanned` / scan queue) is the wallet database itself, so it survives a cancel
+///    and also a killed process, and the next call resumes from it.
+pub async fn sync_cancellable(
+    w: &mut ZcashWallet,
+    client: &mut Client,
+    batch_size: u32,
+    cancel: &CancelToken,
+) -> Result<SyncOutcome, ZcashError> {
+    if cancel.is_cancelled() {
+        return Ok(SyncOutcome::Cancelled);
+    }
     let cache = MemBlockCache::default();
     let params = w.net.params();
-    zcash_client_backend::sync::run(
-        client,
-        &params,
-        &cache,
-        &mut w.db,
-        batch_size.clamp(10, 1000),
-    )
-    .await
-    .map_err(|e| ZcashError::Wallet(format!("sync: {e}")))?;
-    enhance_transactions(w, client).await
+    tokio::select! {
+        biased;
+        result = zcash_client_backend::sync::run(
+            client,
+            &params,
+            &cache,
+            &mut w.db,
+            batch_size.clamp(10, 1000),
+        ) => result.map_err(|e| ZcashError::Wallet(format!("sync: {e}")))?,
+        () = cancel.cancelled() => return Ok(SyncOutcome::Cancelled),
+    }
+    enhance_transactions(w, client, cancel).await
 }
 
 /// Complete the reference compact-block scanner's requested raw transaction
 /// enhancement and transparent spentness checks. A network failure is never
 /// interpreted as proof that a pending transaction cannot confirm.
-async fn enhance_transactions(w: &mut ZcashWallet, client: &mut Client) -> Result<(), ZcashError> {
+async fn enhance_transactions(
+    w: &mut ZcashWallet,
+    client: &mut Client,
+    cancel: &CancelToken,
+) -> Result<SyncOutcome, ZcashError> {
     use zcash_client_backend::data_api::TransactionDataRequest;
     use zcash_client_backend::proto::service::{
         BlockId, BlockRange, TransparentAddressBlockFilter, TxFilter,
@@ -41,6 +127,11 @@ async fn enhance_transactions(w: &mut ZcashWallet, client: &mut Client) -> Resul
     use zcash_keys::encoding::AddressCodec as _;
     let tip = update_tip(w, client).await?;
     for request in w.db.transaction_data_requests().map_err(wallet)? {
+        // Every request is independent and stays queued in the database until it is answered, so stopping between two of
+        // them loses nothing.
+        if cancel.is_cancelled() {
+            return Ok(SyncOutcome::Cancelled);
+        }
         match request {
             TransactionDataRequest::GetStatus(txid) | TransactionDataRequest::Enhancement(txid) => {
                 let raw = client
@@ -92,6 +183,11 @@ async fn enhance_transactions(w: &mut ZcashWallet, client: &mut Client) -> Resul
                     .await
                     .map_err(|e| ZcashError::Server(e.to_string()))?
                 {
+                    // Stopping here leaves the address request unanswered (it is only marked checked below), so the
+                    // whole range is requested again next time; storing a transaction twice is idempotent.
+                    if cancel.is_cancelled() {
+                        return Ok(SyncOutcome::Cancelled);
+                    }
                     if raw.height < u64::from(start) || raw.height >= u64::from(end) {
                         return Err(ZcashError::Server(
                             "transaction is outside the requested block range".to_owned(),
@@ -107,7 +203,7 @@ async fn enhance_transactions(w: &mut ZcashWallet, client: &mut Client) -> Resul
             }
         }
     }
-    Ok(())
+    Ok(SyncOutcome::Complete)
 }
 
 fn store_raw_transaction(
@@ -297,5 +393,54 @@ mod tests {
             "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
         );
         assert!(super::canonical_txid(&[0; 31]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::CancelToken;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_cancel_before_waiting_is_not_lost() {
+        let token = CancelToken::new();
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("an already-cancelled token resolves at once");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_waiting_wakes_every_clone() {
+        let token = CancelToken::new();
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let t = token.clone();
+                tokio::spawn(async move { t.cancelled().await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!token.is_cancelled());
+        token.cancel();
+        for w in waiters {
+            tokio::time::timeout(Duration::from_secs(1), w)
+                .await
+                .expect("woken")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_rearms_the_token() {
+        let token = CancelToken::new();
+        token.cancel();
+        token.reset();
+        assert!(!token.is_cancelled());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), token.cancelled())
+                .await
+                .is_err(),
+            "a reset token does not resolve"
+        );
     }
 }

@@ -86,6 +86,9 @@ impl MoneroStore {
             .map_err(db)?;
         match have {
             None => {
+                // One transaction: a process killed in the middle must not leave an account row without its restore
+                // height and scan checkpoint (the next start would then trust a half-registered store).
+                let transaction = self.conn.unchecked_transaction().map_err(db)?;
                 self.conn
                     .execute("INSERT INTO xmr_meta(k,v) VALUES('account',?1)", [&want])
                     .map_err(db)?;
@@ -98,6 +101,7 @@ impl MoneroStore {
                     })? - 1)
                         .to_string(),
                 )?;
+                transaction.commit().map_err(db)?;
                 Ok(())
             }
             Some(h) if h == want => Ok(()),
@@ -105,6 +109,15 @@ impl MoneroStore {
                 "this store belongs to another account or network".to_owned(),
             )),
         }
+    }
+
+    /// SQLite's own consistency check (`PRAGMA integrity_check`), used after an abrupt termination.
+    pub fn integrity_ok(&self) -> Result<bool, MoneroError> {
+        let answer: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .map_err(db)?;
+        Ok(answer == "ok")
     }
 
     pub fn set_meta(&self, k: &str, v: &str) -> Result<(), MoneroError> {

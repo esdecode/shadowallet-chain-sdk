@@ -19,8 +19,8 @@ pub use account::{
 pub use net::{MAINNET, TESTNET, ZcashNet};
 pub use send::{PreparedSend, prepare_send, sign_and_broadcast};
 pub use sync::{
-    Balances, TxRow, balances, current_address, history, new_address, sync, transparent_address_of,
-    update_tip,
+    Balances, CancelToken, SyncOutcome, TxRow, balances, current_address, history, new_address,
+    sync, sync_cancellable, transparent_address_of, update_tip,
 };
 pub use wallet::{
     Client, Db, MemBlockCache, ServerInfo, ZcashWallet, connect, latest_height, open_wallet,
