@@ -1,0 +1,24 @@
+[package]
+name = "shadowallet-chain-zano"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Zano: read-only daemon JSON-RPC access and an explicit capability report. No keys, no signing, no confidential-asset cryptography (see lib.rs)."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["zano", "wallet", "node"]
+categories = ["cryptocurrency", "finance"]
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true
