@@ -3804,6 +3804,7 @@ dependencies = [
  "bdk_bitcoind_rpc",
  "hex",
  "litecoin",
+ "reqwest",
  "rusqlite 0.41.1",
  "serde",
  "serde_json",
@@ -3811,6 +3812,7 @@ dependencies = [
  "shadowallet-chain-core",
  "shadowallet-chain-utxo",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

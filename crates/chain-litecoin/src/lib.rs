@@ -5,6 +5,7 @@
 //! seed or private key, and it cannot sign by itself.
 
 pub mod engine;
+pub mod esplora;
 
 use std::str::FromStr;
 

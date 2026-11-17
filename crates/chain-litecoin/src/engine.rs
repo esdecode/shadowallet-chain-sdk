@@ -15,6 +15,7 @@ use rusqlite::{Connection as Sqlite, params};
 use serde::{Deserialize, Serialize};
 use shadowallet_chain_utxo::{FeeEstimate, Utxo, UtxoBalance, UtxoHistoryEntry};
 
+use crate::esplora::EsploraClient;
 use crate::{LitecoinSdkError, LtcAccount, LtcNetwork, UnsignedTransfer, prepare_transfer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +45,10 @@ struct Persisted {
 
 pub struct LtcEngine {
     account: LtcAccount,
-    rpc: Client,
+    /// Exactly one backend is set: Litecoin Core RPC or an Esplora REST server.
+    rpc: Option<Client>,
+    esplora: Option<EsploraClient>,
+    lookahead: u32,
     db: Sqlite,
     addresses: Vec<(u32, u32, Address, ScriptBuf)>,
     utxos: Vec<LtcUtxo>,
@@ -81,12 +85,56 @@ impl LtcEngine {
         db_path: &Path,
         lookahead: u32,
     ) -> Result<Self, LitecoinSdkError> {
-        let account = LtcAccount::from_xpub(network, xpub, fingerprint)?;
         let rpc = Client::new(
             rpc_url,
             Auth::UserPass(rpc_user.to_owned(), rpc_password.to_owned()),
         )
         .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+        let engine = Self::open_inner(
+            network,
+            xpub,
+            fingerprint,
+            Some(rpc),
+            None,
+            db_path,
+            lookahead,
+        )?;
+        engine.import_addresses()?;
+        Ok(engine)
+    }
+
+    /// Open against an Esplora REST server (for example `https://litecoinspace.org/testnet/api`). Nothing is
+    /// imported anywhere: the server only ever sees public addresses when `sync` asks about them.
+    pub fn open_esplora(
+        network: LtcNetwork,
+        xpub: &str,
+        fingerprint: [u8; 4],
+        base_url: &str,
+        db_path: &Path,
+        lookahead: u32,
+    ) -> Result<Self, LitecoinSdkError> {
+        let esplora = EsploraClient::new(base_url)?;
+        Self::open_inner(
+            network,
+            xpub,
+            fingerprint,
+            None,
+            Some(esplora),
+            db_path,
+            lookahead,
+        )
+    }
+
+    fn open_inner(
+        network: LtcNetwork,
+        xpub: &str,
+        fingerprint: [u8; 4],
+        rpc: Option<Client>,
+        esplora: Option<EsploraClient>,
+        db_path: &Path,
+        lookahead: u32,
+    ) -> Result<Self, LitecoinSdkError> {
+        let account = LtcAccount::from_xpub(network, xpub, fingerprint)?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
@@ -109,6 +157,8 @@ impl LtcEngine {
         let mut engine = Self {
             account,
             rpc,
+            esplora,
+            lookahead,
             db,
             addresses: Vec::new(),
             utxos: Vec::new(),
@@ -118,8 +168,17 @@ impl LtcEngine {
         };
         engine.load_meta()?;
         engine.build_addresses(lookahead)?;
-        engine.import_addresses()?;
         Ok(engine)
+    }
+
+    fn rpc(&self) -> Result<&Client, LitecoinSdkError> {
+        self.rpc
+            .as_ref()
+            .ok_or_else(|| LitecoinSdkError::Transaction("no Litecoin Core backend".to_owned()))
+    }
+
+    pub fn esplora(&self) -> Option<&EsploraClient> {
+        self.esplora.as_ref()
     }
 
     pub fn network(&self) -> LtcNetwork {
@@ -247,7 +306,7 @@ impl LtcEngine {
     fn import_addresses(&self) -> Result<(), LitecoinSdkError> {
         for (_, _, address, _) in &self.addresses {
             let _: serde_json::Value = self
-                .rpc
+                .rpc()?
                 .call(
                     "importaddress",
                     &[
@@ -262,8 +321,11 @@ impl LtcEngine {
     }
 
     fn import_address(&self, address: &Address) -> Result<(), LitecoinSdkError> {
+        if self.esplora.is_some() {
+            return Ok(());
+        }
         let _: serde_json::Value = self
-            .rpc
+            .rpc()?
             .call(
                 "importaddress",
                 &[
@@ -288,13 +350,13 @@ impl LtcEngine {
         // node (every public test network here) has none. The node wallet knows every transaction
         // that pays one of our imported addresses, so fall back to `gettransaction` (its `hex`).
         let hex: String = match self
-            .rpc
+            .rpc()?
             .call::<String>("getrawtransaction", &[serde_json::json!(txid.to_string())])
         {
             Ok(hex) => hex,
             Err(_) => {
                 let wallet_tx: serde_json::Value = self
-                    .rpc
+                    .rpc()?
                     .call("gettransaction", &[serde_json::json!(txid.to_string())])
                     .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
                 wallet_tx
@@ -310,8 +372,11 @@ impl LtcEngine {
     }
 
     pub fn sync(&mut self) -> Result<LtcSyncReport, LitecoinSdkError> {
+        if self.esplora.is_some() {
+            return self.sync_esplora();
+        }
         let tip = self
-            .rpc
+            .rpc()?
             .get_block_count()
             .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
         let addresses: Vec<String> = self
@@ -320,7 +385,7 @@ impl LtcEngine {
             .map(|(_, _, a, _)| a.to_string())
             .collect();
         let unspent: Vec<serde_json::Value> = self
-            .rpc
+            .rpc()?
             .call(
                 "listunspent",
                 &[
@@ -380,7 +445,7 @@ impl LtcEngine {
         self.utxos = utxos;
 
         let listed: Vec<serde_json::Value> = self
-            .rpc
+            .rpc()?
             .call(
                 "listtransactions",
                 &[
@@ -462,6 +527,174 @@ impl LtcEngine {
         })
     }
 
+    /// Esplora synchronization: full history per watched address (paginated), BIP44 gap extension on both
+    /// chains, UTXOs re-read from verified transaction bytes. Only addresses and txids go to the server.
+    fn sync_esplora(&mut self) -> Result<LtcSyncReport, LitecoinSdkError> {
+        let es = self
+            .esplora
+            .clone()
+            .ok_or_else(|| LitecoinSdkError::Transaction("no Esplora backend".to_owned()))?;
+        let tip = es.tip_height()?;
+        let mut scanned: HashMap<String, Vec<crate::esplora::EsploraTx>> = HashMap::new();
+        loop {
+            let pending: Vec<String> = self
+                .addresses
+                .iter()
+                .map(|(_, _, a, _)| a.to_string())
+                .filter(|a| !scanned.contains_key(a))
+                .collect();
+            for address in pending {
+                let txs = es.address_txs(&address)?;
+                scanned.insert(address, txs);
+            }
+            let highest = |keychain: u32| -> Option<u32> {
+                self.addresses
+                    .iter()
+                    .filter(|(k, _, a, _)| {
+                        *k == keychain && scanned.get(&a.to_string()).is_some_and(|t| !t.is_empty())
+                    })
+                    .map(|(_, i, _, _)| *i)
+                    .max()
+            };
+            let used_external = highest(0);
+            let used_change = highest(1);
+            let mut grew = false;
+            if let Some(h) = used_external {
+                self.external_index = self.external_index.max(h.saturating_add(1));
+                grew |= self.extend_chain(0, h.saturating_add(1).saturating_add(self.lookahead))?;
+            }
+            if let Some(h) = used_change {
+                self.change_index = self.change_index.max(h.saturating_add(1));
+            }
+            grew |= self.extend_chain(1, self.change_index.saturating_add(Self::CHANGE_GAP))?;
+            if !grew {
+                break;
+            }
+        }
+
+        let ours: HashSet<String> = self
+            .addresses
+            .iter()
+            .map(|(_, _, _, spk)| hex::encode(spk.as_bytes()))
+            .collect();
+        let mut by_txid: HashMap<String, crate::esplora::EsploraTx> = HashMap::new();
+        for tx in scanned.values().flatten() {
+            by_txid.entry(tx.txid.clone()).or_insert_with(|| tx.clone());
+        }
+        let mut history: Vec<UtxoHistoryEntry> = by_txid
+            .values()
+            .map(|tx| UtxoHistoryEntry {
+                txid: tx.txid.clone(),
+                received_sats: tx
+                    .outputs
+                    .iter()
+                    .filter(|(s, _)| ours.contains(s))
+                    .map(|(_, v)| *v)
+                    .sum(),
+                sent_sats: tx
+                    .inputs
+                    .iter()
+                    .flatten()
+                    .filter(|(s, _)| ours.contains(s))
+                    .map(|(_, v)| *v)
+                    .sum(),
+                confirmation_height: tx.height,
+            })
+            .collect();
+        // Oldest first, unconfirmed last (the order the node wallet lists them in).
+        history.sort_by(|a, b| {
+            let key = |h: &UtxoHistoryEntry| {
+                (
+                    h.confirmation_height.is_none(),
+                    h.confirmation_height,
+                    h.txid.clone(),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+
+        let mut utxos = Vec::new();
+        let mut tx_cache: HashMap<String, Transaction> = HashMap::new();
+        let owned: Vec<(u32, u32, String, ScriptBuf)> = self
+            .addresses
+            .iter()
+            .map(|(k, i, a, s)| (*k, *i, a.to_string(), s.clone()))
+            .collect();
+        for (keychain, index, address, spk) in owned {
+            if scanned.get(&address).is_none_or(|t| t.is_empty()) {
+                continue;
+            }
+            for entry in es.address_utxos(&address)? {
+                let tx = match tx_cache.get(&entry.txid) {
+                    Some(tx) => tx.clone(),
+                    None => {
+                        let raw = es.tx_hex(&entry.txid)?;
+                        let tx: Transaction = deserialize_hex(&raw)
+                            .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+                        // The server is untrusted: the bytes must hash to the txid that was asked for.
+                        if tx.compute_txid().to_string() != entry.txid {
+                            return Err(LitecoinSdkError::Transaction(
+                                "backend returned a transaction that does not match its txid"
+                                    .to_owned(),
+                            ));
+                        }
+                        tx_cache.insert(entry.txid.clone(), tx.clone());
+                        tx
+                    }
+                };
+                let out = tx
+                    .output
+                    .get(entry.vout as usize)
+                    .ok_or_else(|| LitecoinSdkError::Transaction("vout missing".to_owned()))?;
+                if out.script_pubkey != spk {
+                    return Err(LitecoinSdkError::Transaction(
+                        "backend reported an output that does not pay the watched address"
+                            .to_owned(),
+                    ));
+                }
+                let txid = Txid::from_str(&entry.txid)
+                    .map_err(|_| LitecoinSdkError::Transaction("bad txid".to_owned()))?;
+                let confirmations = entry
+                    .height
+                    .map_or(0, |h| tip.saturating_sub(h).saturating_add(1))
+                    as u32;
+                utxos.push(LtcUtxo {
+                    outpoint: OutPoint {
+                        txid,
+                        vout: entry.vout,
+                    },
+                    value_sats: out.value.to_sat(),
+                    confirmations,
+                    keychain,
+                    index,
+                });
+            }
+        }
+        self.utxos = utxos;
+        self.history = history;
+        self.persist()?;
+        Ok(LtcSyncReport {
+            tip_height: tip,
+            utxos: self.utxos.len(),
+            history: self.history.len(),
+        })
+    }
+
+    /// Derive watched addresses of `keychain` up to (excluding) `count`. Returns whether any were added.
+    fn extend_chain(&mut self, keychain: u32, count: u32) -> Result<bool, LitecoinSdkError> {
+        let have = self
+            .addresses
+            .iter()
+            .filter(|(k, _, _, _)| *k == keychain)
+            .count() as u32;
+        for index in have..count {
+            let address = self.account.address(keychain, index)?;
+            self.addresses
+                .push((keychain, index, address.clone(), address.script_pubkey()));
+        }
+        Ok(count > have)
+    }
+
     pub fn balance(&self) -> UtxoBalance {
         let mut balance = UtxoBalance::default();
         for utxo in &self.utxos {
@@ -513,9 +746,29 @@ impl LtcEngine {
     }
 
     pub fn fee_estimates(&self) -> FeeEstimate {
+        let floor = |source: &str| FeeEstimate {
+            economy_sat_vb: 1,
+            normal_sat_vb: 1,
+            priority_sat_vb: 1,
+            source: source.to_owned(),
+        };
+        if let Some(es) = &self.esplora {
+            return match es.fees() {
+                Some(f) => FeeEstimate {
+                    economy_sat_vb: f.economy,
+                    normal_sat_vb: f.normal,
+                    priority_sat_vb: f.priority,
+                    source: f.source.to_owned(),
+                },
+                // Neither fee dialect answered: Litecoin's minimum relay fee is 1 sat/vB.
+                None => floor("policy-floor"),
+            };
+        }
+        let Ok(rpc) = self.rpc() else {
+            return floor("policy-floor");
+        };
         let target = |blocks: u64| -> Option<u64> {
-            let value: serde_json::Value = self
-                .rpc
+            let value: serde_json::Value = rpc
                 .call("estimatesmartfee", &[serde_json::json!(blocks)])
                 .ok()?;
             value
@@ -534,8 +787,7 @@ impl LtcEngine {
                 source: "estimatesmartfee".to_owned(),
             };
         }
-        let relay = self
-            .rpc
+        let relay = rpc
             .call::<serde_json::Value>("getnetworkinfo", &[])
             .ok()
             .and_then(|v| v.get("relayfee").and_then(|r| r.as_f64()))
@@ -557,14 +809,37 @@ impl LtcEngine {
     }
 
     pub fn broadcast_hex(&self, hex: &str) -> Result<String, LitecoinSdkError> {
-        self.rpc
+        if let Some(es) = &self.esplora {
+            let local: Transaction =
+                deserialize_hex(hex).map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+            let answered = es.broadcast(hex)?;
+            let expected = local.compute_txid().to_string();
+            if answered != expected {
+                return Err(LitecoinSdkError::Transaction(format!(
+                    "backend answered txid {answered}, expected {expected}"
+                )));
+            }
+            return Ok(answered);
+        }
+        self.rpc()?
             .call("sendrawtransaction", &[serde_json::json!(hex)])
             .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))
     }
 
     pub fn transaction_status(&self, txid: &str) -> Result<serde_json::Value, LitecoinSdkError> {
+        if let Some(es) = &self.esplora {
+            let confirmations = match es.tx_status(txid)? {
+                Some(height) => es.tip_height()?.saturating_sub(height).saturating_add(1),
+                None => 0,
+            };
+            return Ok(serde_json::json!({
+                "txid": txid,
+                "confirmations": confirmations,
+                "blockhash": serde_json::Value::Null,
+            }));
+        }
         let tx: serde_json::Value = self
-            .rpc
+            .rpc()?
             .call(
                 "gettransaction",
                 &[serde_json::json!(txid), serde_json::json!(true)],
@@ -577,9 +852,62 @@ impl LtcEngine {
         }))
     }
 
+    /// Is the outpoint still unspent according to the backend (mempool spends included)?
+    pub fn output_unspent(&self, txid: &str, vout: u32) -> Result<bool, LitecoinSdkError> {
+        match &self.esplora {
+            Some(es) => es.output_unspent(txid, vout),
+            None => {
+                let answer: serde_json::Value = self
+                    .rpc()?
+                    .call(
+                        "gettxout",
+                        &[
+                            serde_json::json!(txid),
+                            serde_json::json!(vout),
+                            serde_json::json!(true),
+                        ],
+                    )
+                    .map_err(|e| LitecoinSdkError::Transaction(format!("node: {e}")))?;
+                Ok(!answer.is_null())
+            }
+        }
+    }
+
+    /// Is the transaction known and unconfirmed right now? `Err` means no usable answer.
+    pub fn in_mempool(&self, txid: &str) -> Result<bool, LitecoinSdkError> {
+        match &self.esplora {
+            Some(es) => match es.tx_status(txid) {
+                Ok(None) => Ok(true),
+                Ok(Some(_)) => Ok(false),
+                Err(e) if e.to_string().contains("HTTP 404") => Ok(false),
+                Err(e) => Err(e),
+            },
+            None => {
+                let answer: Result<serde_json::Value, _> = self
+                    .rpc()?
+                    .call("getmempoolentry", &[serde_json::json!(txid)]);
+                match answer {
+                    Ok(_) => Ok(true),
+                    Err(e) => {
+                        let m = e.to_string();
+                        if m.contains("-5") && m.to_ascii_lowercase().contains("not in mempool") {
+                            Ok(false)
+                        } else {
+                            Err(LitecoinSdkError::Transaction(format!("node: {m}")))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn rescan(&self) -> Result<(), LitecoinSdkError> {
+        if self.esplora.is_some() {
+            // An Esplora server is queried for the full history on every sync; there is nothing to rescan.
+            return Ok(());
+        }
         let _: serde_json::Value = self
-            .rpc
+            .rpc()?
             .call("rescanblockchain", &[])
             .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
         Ok(())
