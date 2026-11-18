@@ -276,6 +276,9 @@ struct Registered {
 }
 
 static REGISTRY: std::sync::Mutex<Vec<Registered>> = std::sync::Mutex::new(Vec::new());
+/// Prefixes that ever had a resolver in this process. They stay protected after the vault locks: a database under
+/// such a prefix is never opened as plaintext again (no fallback when the key is gone), only refused.
+static PROTECTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 static REQUIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Default salt (no rotation yet). A rotated store has its own salt file next to it, see [`salt_path`].
@@ -303,6 +306,11 @@ fn read_salt(db: &Path) -> Result<[u8; 32], SecureDbError> {
 
 /// Register the key resolver for every database whose path starts with `prefix` (the vault path), owned by `owner`.
 pub fn register_resolver(prefix: &str, owner: u64, resolver: Resolver) {
+    if let Ok(mut p) = PROTECTED.lock()
+        && !p.iter().any(|x| x == prefix)
+    {
+        p.push(prefix.to_owned());
+    }
     if let Ok(mut g) = REGISTRY.lock() {
         g.retain(|r| !(r.prefix == prefix && r.owner == owner));
         g.push(Registered {
@@ -320,8 +328,9 @@ pub fn unregister_resolver(owner: u64) {
     }
 }
 
-/// From now on opening any database that no resolver covers is an error instead of a plaintext open. The Wallet
-/// calls this once at start; a store that was forgotten fails loudly instead of leaving data unencrypted.
+/// Strict mode: from now on opening ANY database that no resolver covers is an error instead of a plaintext open.
+/// (The Wallet relies on the per-vault protection that [`register_resolver`] already gives: everything under a vault
+/// path that ever had a key is refused without one. This switch is for a process that wants no plaintext at all.)
 pub fn require_encryption() {
     REQUIRED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -341,6 +350,15 @@ fn info_of(path: &Path, prefix: &str) -> String {
     let full = norm(&path.to_string_lossy());
     let pre = norm(prefix);
     full[pre.len()..].trim_start_matches('.').to_owned()
+}
+
+fn is_protected(full: &str) -> bool {
+    PROTECTED.lock().is_ok_and(|p| {
+        p.iter().any(|pre| {
+            let pre = norm(pre);
+            full.starts_with(&pre) && matches!(full.as_bytes().get(pre.len()), Some(b'.' | b'/'))
+        })
+    })
 }
 
 /// Decide how `path` is opened: with a key (a resolver covers it), plain (no resolver and encryption not required),
