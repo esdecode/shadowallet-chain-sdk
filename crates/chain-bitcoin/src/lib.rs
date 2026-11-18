@@ -656,6 +656,386 @@ impl BitcoinEngine {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Coin Control: output listing, explicit input selection and an independent PSBT summary.
+// ---------------------------------------------------------------------------------------------
+
+/// One unspent output of the wallet, as a coin-selection UI needs it. Everything is derived from the
+/// wallet's own synchronized view; nothing here is supplied by a caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtxoInfo {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+    pub address: Option<String>,
+    /// Output of the internal (change) keychain.
+    pub is_change: bool,
+    pub derivation_index: u32,
+    /// Block height of the confirming block; `None` while unconfirmed.
+    pub confirmation_height: Option<u32>,
+    /// Timestamp of the confirming block header; `None` while unconfirmed.
+    pub confirmation_time: Option<u64>,
+    /// `tip - height + 1` when confirmed, `0` otherwise.
+    pub confirmations: u64,
+}
+
+/// One input of a PSBT with the value it spends (taken from the PSBT's own previous-output data).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsbtInputInfo {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+}
+
+/// One output of a PSBT. `is_change` is true only for the wallet's own internal keychain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsbtOutputInfo {
+    pub script_pubkey_hex: String,
+    pub address: Option<String>,
+    pub value_sats: u64,
+    pub is_mine: bool,
+    pub is_change: bool,
+}
+
+/// What an unsigned PSBT really does, recomputed from the PSBT bytes with integer arithmetic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsbtSummary {
+    pub inputs: Vec<PsbtInputInfo>,
+    pub outputs: Vec<PsbtOutputInfo>,
+    pub total_in_sats: u64,
+    pub total_out_sats: u64,
+    pub fee_sats: u64,
+}
+
+fn parse_outpoint(txid: &str, vout: u32) -> Result<OutPoint, BitcoinError> {
+    let txid = bdk_wallet::bitcoin::Txid::from_str(txid)
+        .map_err(|e| BitcoinError::Engine(format!("bad outpoint: {e}")))?;
+    Ok(OutPoint::new(txid, vout))
+}
+
+impl BitcoinEngine {
+    /// Every unspent output the wallet knows, with the data Coin Control displays.
+    pub fn list_utxos(&self) -> Vec<UtxoInfo> {
+        use bdk_wallet::chain::ChainPosition;
+        let tip = self.wallet.latest_checkpoint().height();
+        let network = self.descriptors.network.network();
+        let mut out: Vec<UtxoInfo> = self
+            .wallet
+            .list_unspent()
+            .map(|u| {
+                let (height, time) = match &u.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => {
+                        (Some(anchor.block_id.height), Some(anchor.confirmation_time))
+                    }
+                    ChainPosition::Unconfirmed { .. } => (None, None),
+                };
+                UtxoInfo {
+                    txid: u.outpoint.txid.to_string(),
+                    vout: u.outpoint.vout,
+                    value_sats: u.txout.value.to_sat(),
+                    script_pubkey_hex: u.txout.script_pubkey.to_hex_string(),
+                    address: Address::from_script(&u.txout.script_pubkey, network)
+                        .ok()
+                        .map(|a| a.to_string()),
+                    is_change: u.keychain == KeychainKind::Internal,
+                    derivation_index: u.derivation_index,
+                    confirmation_height: height,
+                    confirmation_time: time,
+                    confirmations: height
+                        .map_or(0, |h| u64::from(tip.saturating_sub(h)).saturating_add(1)),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| (a.txid.as_str(), a.vout).cmp(&(b.txid.as_str(), b.vout)));
+        out
+    }
+
+    /// Build an unsigned PSBT that spends **exactly** the `selected` outpoints, never more.
+    ///
+    /// Refused, with nothing built: an empty selection, a duplicate outpoint, an outpoint that is not
+    /// an unspent output of this wallet, and an outpoint also present in `blocked` (frozen or reserved
+    /// by the caller). Insufficient selected funds fail with [`BitcoinError::InsufficientFunds`]; the
+    /// engine never falls back to automatic selection. With `send_max` the whole selection is swept to
+    /// the destination. The finished PSBT is checked to contain exactly the selected inputs.
+    pub fn build_transfer_selected(
+        &mut self,
+        destination: &str,
+        amount_sats: u64,
+        fee_rate_sat_vb: u64,
+        send_max: bool,
+        selected: &[(String, u32)],
+        blocked: &[(String, u32)],
+    ) -> Result<TransferPlan, BitcoinError> {
+        if self.descriptors.network.is_mainnet() {
+            return Err(BitcoinError::MainnetDisabled);
+        }
+        if selected.is_empty() {
+            return Err(BitcoinError::Engine("no inputs selected".to_owned()));
+        }
+        let mut wanted = std::collections::BTreeSet::new();
+        for (txid, vout) in selected {
+            if !wanted.insert(parse_outpoint(txid, *vout)?) {
+                return Err(BitcoinError::Engine(format!(
+                    "duplicate input {txid}:{vout}"
+                )));
+            }
+        }
+        let blocked: std::collections::BTreeSet<OutPoint> = blocked
+            .iter()
+            .map(|(t, v)| parse_outpoint(t, *v))
+            .collect::<Result<_, _>>()?;
+        let unspent: std::collections::BTreeSet<OutPoint> =
+            self.list_unspent().into_iter().collect();
+        for outpoint in &wanted {
+            if !unspent.contains(outpoint) {
+                return Err(BitcoinError::Engine(format!(
+                    "input {outpoint} is not an unspent output of this wallet"
+                )));
+            }
+            if blocked.contains(outpoint) {
+                return Err(BitcoinError::Engine(format!(
+                    "input {outpoint} is frozen or reserved by another transaction"
+                )));
+            }
+        }
+        let address = self.validate_address(destination)?;
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(BitcoinError::Unsupported)?;
+        let list: Vec<OutPoint> = wanted.iter().copied().collect();
+        let mut builder = self.wallet.build_tx();
+        builder
+            .add_utxos(&list)
+            .map_err(|e| BitcoinError::Engine(format!("input refused: {e}")))?;
+        builder.manually_selected_only();
+        if send_max {
+            builder.drain_to(address.script_pubkey());
+        } else {
+            if amount_sats == 0 {
+                return Err(BitcoinError::Unsupported);
+            }
+            builder.add_recipient(address.script_pubkey(), Amount::from_sat(amount_sats));
+        }
+        builder
+            .fee_rate(fee_rate)
+            .set_exact_sequence(bdk_wallet::bitcoin::Sequence::from_consensus(0xFFFF_FFFD));
+        let psbt = builder.finish().map_err(|e| {
+            let text = e.to_string();
+            if text.to_lowercase().contains("insufficient") {
+                BitcoinError::InsufficientFunds
+            } else {
+                BitcoinError::Engine(text)
+            }
+        })?;
+        let used: std::collections::BTreeSet<OutPoint> = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|i| i.previous_output)
+            .collect();
+        if used != wanted || psbt.unsigned_tx.input.len() != wanted.len() {
+            return Err(BitcoinError::Engine(
+                "the built transaction does not spend exactly the selected inputs".to_owned(),
+            ));
+        }
+        let fee_sats = psbt.fee().map(|fee| fee.to_sat()).unwrap_or(0);
+        BITCOIN_FEE_POLICY
+            .check(
+                fee_rate_sat_vb,
+                fee_sats,
+                if send_max { None } else { Some(amount_sats) },
+            )
+            .map_err(|_| BitcoinError::FeeTooHigh)?;
+        Ok(TransferPlan {
+            psbt: psbt.serialize(),
+            fee_sats,
+        })
+    }
+
+    /// Recompute, from the PSBT bytes alone, which outputs it spends, what it pays and where, and the
+    /// fee. Used to check a reviewed intent against the transaction that would really be signed.
+    pub fn describe_psbt(&self, psbt_bytes: &[u8]) -> Result<PsbtSummary, BitcoinError> {
+        let psbt = bdk_wallet::bitcoin::psbt::Psbt::deserialize(psbt_bytes)
+            .map_err(|e| BitcoinError::Engine(e.to_string()))?;
+        let network = self.descriptors.network.network();
+        let mut inputs = Vec::new();
+        let mut total_in: u64 = 0;
+        for (index, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+            let data = psbt
+                .inputs
+                .get(index)
+                .ok_or_else(|| BitcoinError::Engine("psbt input data missing".to_owned()))?;
+            let value = if let Some(utxo) = &data.witness_utxo {
+                utxo.value.to_sat()
+            } else if let Some(prev) = &data.non_witness_utxo {
+                prev.output
+                    .get(txin.previous_output.vout as usize)
+                    .map(|o| o.value.to_sat())
+                    .ok_or_else(|| {
+                        BitcoinError::Engine("psbt previous output missing".to_owned())
+                    })?
+            } else {
+                return Err(BitcoinError::Engine(
+                    "psbt input without previous output data".to_owned(),
+                ));
+            };
+            total_in = total_in
+                .checked_add(value)
+                .ok_or_else(|| BitcoinError::Engine("input total overflows".to_owned()))?;
+            inputs.push(PsbtInputInfo {
+                txid: txin.previous_output.txid.to_string(),
+                vout: txin.previous_output.vout,
+                value_sats: value,
+            });
+        }
+        let mut outputs = Vec::new();
+        let mut total_out: u64 = 0;
+        for out in &psbt.unsigned_tx.output {
+            let sats = out.value.to_sat();
+            total_out = total_out
+                .checked_add(sats)
+                .ok_or_else(|| BitcoinError::Engine("output total overflows".to_owned()))?;
+            let own = self.wallet.derivation_of_spk(out.script_pubkey.clone());
+            outputs.push(PsbtOutputInfo {
+                script_pubkey_hex: out.script_pubkey.to_hex_string(),
+                address: Address::from_script(&out.script_pubkey, network)
+                    .ok()
+                    .map(|a| a.to_string()),
+                value_sats: sats,
+                is_mine: own.is_some(),
+                is_change: matches!(own, Some((KeychainKind::Internal, _))),
+            });
+        }
+        let fee_sats = total_in
+            .checked_sub(total_out)
+            .ok_or_else(|| BitcoinError::Engine("outputs exceed inputs".to_owned()))?;
+        Ok(PsbtSummary {
+            inputs,
+            outputs,
+            total_in_sats: total_in,
+            total_out_sats: total_out,
+            fee_sats,
+        })
+    }
+}
+
+/// Deterministic fixtures for tests. Compiled only with the `test-support` feature: they put synthetic,
+/// unsigned-prevout transactions into the wallet's view, so offline tests can have UTXOs without a node.
+#[cfg(feature = "test-support")]
+impl BitcoinEngine {
+    fn test_tx(
+        &self,
+        tag: u8,
+        outputs: Vec<(bdk_wallet::bitcoin::ScriptBuf, u64)>,
+        spend: Vec<OutPoint>,
+    ) -> bdk_wallet::bitcoin::Transaction {
+        use bdk_wallet::bitcoin::{ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        let inputs = if spend.is_empty() {
+            let mut bytes = [0u8; 32];
+            bytes.fill(tag);
+            vec![OutPoint::new(
+                bdk_wallet::bitcoin::Txid::from_raw_hash(
+                    bdk_wallet::bitcoin::hashes::Hash::from_byte_array(bytes),
+                ),
+                u32::from(tag),
+            )]
+        } else {
+            spend
+        };
+        Transaction {
+            version: bdk_wallet::bitcoin::transaction::Version::TWO,
+            lock_time: bdk_wallet::bitcoin::absolute::LockTime::ZERO,
+            input: inputs
+                .into_iter()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: outputs
+                .into_iter()
+                .map(|(script_pubkey, sats)| TxOut {
+                    value: Amount::from_sat(sats),
+                    script_pubkey,
+                })
+                .collect(),
+        }
+    }
+
+    /// Pay `amounts` (satoshis) to the wallet's external addresses `0..n` in one synthetic transaction;
+    /// confirmed in a new block on top of the current tip, or unconfirmed. Returns the txid.
+    pub fn fund_for_test(&mut self, tag: u8, amounts: &[u64], confirmed: bool) -> String {
+        let outputs = amounts
+            .iter()
+            .enumerate()
+            .map(|(i, sats)| {
+                let spk = self
+                    .wallet
+                    .peek_address(KeychainKind::External, i as u32)
+                    .address
+                    .script_pubkey();
+                (spk, *sats)
+            })
+            .collect();
+        let tx = self.test_tx(tag, outputs, Vec::new());
+        self.apply_test_tx(tx, confirmed)
+    }
+
+    /// Pay `sats` to an arbitrary script (a foreign recipient), spending `spend` (an outpoint the wallet
+    /// owns): the way a wallet output becomes spent on-chain without this wallet's involvement.
+    pub fn spend_for_test(&mut self, spend: &[(String, u32)], confirmed: bool) -> String {
+        let spend: Vec<OutPoint> = spend
+            .iter()
+            .map(|(t, v)| parse_outpoint(t, *v).unwrap_or_else(|_| OutPoint::null()))
+            .collect();
+        let foreign = bdk_wallet::bitcoin::ScriptBuf::new_op_return([0x42u8; 4]);
+        let tx = self.test_tx(0, vec![(foreign, 0)], spend);
+        self.apply_test_tx(tx, confirmed)
+    }
+
+    /// Mine `n` empty blocks on top of the tip (raises confirmations).
+    pub fn mine_for_test(&mut self, n: u32) {
+        for _ in 0..n {
+            self.apply_test_block(Vec::new());
+        }
+    }
+
+    fn apply_test_tx(&mut self, tx: bdk_wallet::bitcoin::Transaction, confirmed: bool) -> String {
+        let txid = tx.compute_txid().to_string();
+        if confirmed {
+            self.apply_test_block(vec![tx]);
+        } else {
+            self.wallet.apply_unconfirmed_txs([(tx, 1_700_000_000u64)]);
+        }
+        let _ = self.persist();
+        txid
+    }
+
+    fn apply_test_block(&mut self, txdata: Vec<bdk_wallet::bitcoin::Transaction>) {
+        use bdk_wallet::bitcoin::block::{Header, Version};
+        use bdk_wallet::bitcoin::{Block, CompactTarget, TxMerkleNode};
+        let tip = self.wallet.latest_checkpoint();
+        let height = tip.height() + 1;
+        let block = Block {
+            header: Header {
+                version: Version::TWO,
+                prev_blockhash: tip.hash(),
+                merkle_root: TxMerkleNode::from_raw_hash(
+                    bdk_wallet::bitcoin::hashes::Hash::all_zeros(),
+                ),
+                time: 1_700_000_000 + height,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: height,
+            },
+            txdata,
+        };
+        let _ = self.wallet.apply_block(&block, height);
+        let _ = self.persist();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod fee_tests {

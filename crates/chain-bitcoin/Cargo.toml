@@ -31,5 +31,13 @@ serde_json.workspace = true
 tempfile = "3"
 tokio.workspace = true
 
+[features]
+# Deterministic synthetic-transaction fixtures for offline tests; never enabled in a wallet build.
+test-support = []
+
+[[test]]
+name = "coin_control"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
