@@ -3952,6 +3952,7 @@ dependencies = [
 name = "shadowallet-chain-securedb"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "getrandom 0.2.17",
  "hkdf",
  "rusqlite 0.41.1",
  "sha2 0.10.9",

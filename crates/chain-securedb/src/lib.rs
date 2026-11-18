@@ -368,32 +368,35 @@ fn is_protected(full: &str) -> bool {
 /// [`SecureDbError::NoKey`] when encryption is required and no key can be produced.
 pub fn resolve(path: &Path) -> Result<Resolved, SecureDbError> {
     let full = norm(&path.to_string_lossy());
-    let hit = {
-        let g = REGISTRY
-            .lock()
-            .map_err(|_| SecureDbError::Io("key registry poisoned".into()))?;
-        g.iter()
-            .filter(|r| {
-                let pre = norm(&r.prefix);
-                full.starts_with(&pre)
-                    && matches!(full.as_bytes().get(pre.len()), Some(b'.' | b'/'))
-            })
-            .max_by_key(|r| r.prefix.len())
-            .map(|r| (r.prefix.clone(), r.resolver.clone()))
-    };
-    match hit {
-        Some((prefix, resolver)) => {
-            let salt = read_salt(path)?;
-            let info = info_of(path, &prefix);
-            resolver(&info, &salt)
-                .map(Resolved::Key)
-                .map_err(SecureDbError::NoKey)
-        }
+    match covering(&full)? {
+        Some(_) => Ok(Resolved::Key(key_for(path, &read_salt(path)?)?)),
         None if REQUIRED.load(std::sync::atomic::Ordering::SeqCst) || is_protected(&full) => Err(
             SecureDbError::NoKey(format!("no key for {} (vault locked?)", path.display())),
         ),
         None => Ok(Resolved::Plain),
     }
+}
+
+/// The resolver that covers `full` (a normalised path), with its prefix.
+fn covering(full: &str) -> Result<Option<(String, Resolver)>, SecureDbError> {
+    let g = REGISTRY
+        .lock()
+        .map_err(|_| SecureDbError::Io("key registry poisoned".into()))?;
+    Ok(g.iter()
+        .filter(|r| {
+            let pre = norm(&r.prefix);
+            full.starts_with(&pre) && matches!(full.as_bytes().get(pre.len()), Some(b'.' | b'/'))
+        })
+        .max_by_key(|r| r.prefix.len())
+        .map(|r| (r.prefix.clone(), r.resolver.clone())))
+}
+
+/// The key a registered resolver yields for `path` under `salt`.
+fn key_for(path: &Path, salt: &[u8; 32]) -> Result<DbKey, SecureDbError> {
+    let full = norm(&path.to_string_lossy());
+    let (prefix, resolver) = covering(&full)?
+        .ok_or_else(|| SecureDbError::NoKey(format!("no key for {}", path.display())))?;
+    resolver(&info_of(path, &prefix), salt).map_err(SecureDbError::NoKey)
 }
 
 /// Resolve `path` and, when a key applies, bring the file to the encrypted state first: an interrupted earlier
@@ -405,7 +408,12 @@ pub fn resolve(path: &Path) -> Result<Resolved, SecureDbError> {
 pub fn prepare(path: &Path) -> Result<Option<DbKey>, SecureDbError> {
     match resolve(path)? {
         Resolved::Plain => Ok(None),
-        Resolved::Key(k) => {
+        Resolved::Key(_) => {
+            // A rotation interrupted by a crash is settled first, so the key used below is the right one.
+            settle_rotation(path)?;
+            let Resolved::Key(k) = resolve(path)? else {
+                return Ok(None);
+            };
             if detect(path)? != Format::Missing || has_retained(path) {
                 migrate_plaintext(path, &k, &|_| Ok(()), None)?;
             }
@@ -597,7 +605,7 @@ pub fn migrate_plaintext(
     };
 
     // Recovery of an interrupted earlier run.
-    let fmt = detect(path)?;
+    let mut fmt = detect(path)?;
     if fmt == Format::Missing && kept.exists() {
         if tmp.exists() {
             // Crash between the two renames. Finish only if the encrypted copy is provably good.
@@ -613,9 +621,11 @@ pub fn migrate_plaintext(
             }
             remove_with_sidecars(&tmp);
         }
+        // The encrypted copy was missing or untrustworthy: put the plaintext original back and migrate it again from
+        // scratch below (the original was never modified, so the migration starts from a known-good source).
         rename_with_sidecars(&kept, path)?;
         sync_dir(path);
-        return Ok(Outcome::Recovered("restored the plaintext original"));
+        fmt = Format::Plaintext;
     }
     if fmt == Format::Plaintext && tmp.exists() {
         remove_with_sidecars(&tmp); // a half-written derived copy; the plaintext original is intact
@@ -762,6 +772,89 @@ pub fn retire_retained(path: &Path) -> Result<u32, SecureDbError> {
 #[must_use]
 pub fn has_retained(path: &Path) -> bool {
     retained_path(path).exists()
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Key rotation
+
+fn next_salt_path(db: &Path) -> PathBuf {
+    side(db, ".keysalt.next")
+}
+
+/// Steps at which a test can stop a rotation (simulating a crash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationStep {
+    AfterProposal,
+    AfterRekey,
+}
+
+fn read_salt_file(p: &Path) -> Result<[u8; 32], SecureDbError> {
+    <[u8; 32]>::try_from(fs::read(p)?.as_slice())
+        .map_err(|_| SecureDbError::Io("key salt file has the wrong size".into()))
+}
+
+/// Finish or drop a rotation that a crash interrupted. The database is at exactly one of two keys: the current salt's
+/// (the rekey never ran: the proposal is dropped) or the proposed salt's (the rekey completed: the proposal is
+/// committed). Anything else is reported, never guessed.
+fn settle_rotation(path: &Path) -> Result<(), SecureDbError> {
+    let next = next_salt_path(path);
+    if !next.exists() {
+        return Ok(());
+    }
+    if detect(path)? != Format::NotPlaintext {
+        fs::remove_file(&next)?;
+        return Ok(());
+    }
+    let cur = key_for(path, &read_salt(path)?)?;
+    if open(path, &cur, false).is_ok() {
+        fs::remove_file(&next)?; // the rekey never happened
+        return Ok(());
+    }
+    let proposed = key_for(path, &read_salt_file(&next)?)?;
+    if open(path, &proposed, false).is_ok() {
+        fs::rename(&next, salt_path(path))?; // the rekey completed; make it official
+        sync_dir(path);
+        return Ok(());
+    }
+    Err(SecureDbError::KeyMismatchOrCorrupt)
+}
+
+/// Rotate the database key: a new random salt gives a new key from the same resolver (the vault's secret is
+/// unchanged; only the non-secret salt changes). Crash-safe: the proposed salt is written and synced first
+/// (`<db>.keysalt.next`), then the database is rekeyed, then the proposal replaces `<db>.keysalt` atomically.
+/// [`prepare`] settles an interrupted rotation on the next open. The database must not be open elsewhere.
+///
+/// # Errors
+/// See [`SecureDbError`]. On error the database keeps a key that [`prepare`] can find.
+pub fn rotate_key(path: &Path, stop_at: Option<RotationStep>) -> Result<(), SecureDbError> {
+    settle_rotation(path)?;
+    let current = key_for(path, &read_salt(path)?)?;
+    let mut salt = [0u8; 32];
+    getrandom::getrandom(&mut salt).map_err(|e| SecureDbError::Io(format!("random: {e}")))?;
+    let new_key = key_for(path, &salt)?;
+    let next = next_salt_path(path);
+    {
+        let mut f = File::create(&next)?;
+        f.write_all(&salt)?;
+        f.sync_all()?;
+    }
+    if stop_at == Some(RotationStep::AfterProposal) {
+        return Err(SecureDbError::Io("stopped after proposal".into()));
+    }
+    {
+        let conn = open(path, &current, false)?;
+        quick_check(&conn)?;
+        rekey(&conn, &new_key)?;
+    }
+    if stop_at == Some(RotationStep::AfterRekey) {
+        return Err(SecureDbError::Io("stopped after rekey".into()));
+    }
+    let conn = open(path, &new_key, false)?;
+    quick_check(&conn)?;
+    drop(conn);
+    fs::rename(&next, salt_path(path))?;
+    sync_dir(path);
+    Ok(())
 }
 
 /// Change the key of an open encrypted database (key rotation). SQLCipher rewrites every page.
@@ -1005,8 +1098,16 @@ mod tests {
         }
         fs::write(&t, data).unwrap();
         let out = migrate_plaintext(&p, &key(5), &ok_verify, None).unwrap();
-        assert_eq!(out, Outcome::Recovered("restored the plaintext original"));
-        assert_eq!(fs::read(&p).unwrap(), orig);
+        // The bad copy was discarded, the original restored and migrated again: the live file is now good encrypted
+        // data and the retained plaintext is byte-identical to the original.
+        assert!(matches!(out, Outcome::Migrated { .. }), "{out:?}");
+        let c = open(&p, &key(5), false).unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            500
+        );
+        assert_eq!(fs::read(retained_path(&p)).unwrap(), orig);
     }
 
     #[test]
