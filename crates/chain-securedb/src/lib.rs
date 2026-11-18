@@ -10,10 +10,7 @@
 //!
 //! Nothing here implements cryptography: encryption is SQLCipher's (AES-256-CBC with per-page HMAC-SHA512 and a
 //! random per-file salt), key derivation is the `hkdf` crate.
-#![cfg_attr(
-    test,
-    allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)
-)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -29,10 +26,16 @@ const PLAINTEXT_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecureDbError {
-    #[error("the linked SQLite is not SQLCipher; refusing to store data that would be left unencrypted")]
+    #[error(
+        "the linked SQLite is not SQLCipher; refusing to store data that would be left unencrypted"
+    )]
     CipherUnavailable,
-    #[error("{0} is a plaintext SQLite database; refusing to open it as an encrypted one (migrate it first)")]
+    #[error(
+        "{0} is a plaintext SQLite database; refusing to open it as an encrypted one (migrate it first)"
+    )]
     PlaintextRefused(String),
+    #[error("no database key available: {0}")]
+    NoKey(String),
     #[error("database does not exist: {0}")]
     Missing(String),
     #[error("the database key does not match, or the encrypted file is damaged")]
@@ -69,6 +72,14 @@ impl DbKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }
+    /// Derive a child key (HKDF-SHA256, same domain separation as [`derive_db_key`]) using this key as the secret.
+    ///
+    /// # Errors
+    /// Never for a 32-byte output.
+    pub fn derive_child(&self, salt: &[u8], info: &str) -> Result<DbKey, SecureDbError> {
+        derive_db_key(&self.0[..], salt, info)
+    }
+
     fn pragma_literal(&self) -> Zeroizing<String> {
         let mut s = String::with_capacity(70);
         s.push_str("x'");
@@ -151,9 +162,25 @@ pub fn cipher_available() -> bool {
         .is_ok_and(|v| !v.is_empty())
 }
 
-fn apply_key(conn: &Connection, key: &DbKey) -> Result<(), SecureDbError> {
+/// The statement that keys a connection (`PRAGMA key` with a raw 256-bit key, no password hashing). For callers whose
+/// SQLite wrapper is another version of `rusqlite` than this crate uses (the Zcash wallet database): run it as the
+/// first statement on the connection, then check [`CIPHER_VERSION_SQL`] returns a non-empty string.
+#[must_use]
+pub fn key_pragma(key: &DbKey) -> Zeroizing<String> {
     let lit = key.pragma_literal();
-    let sql = Zeroizing::new(format!("PRAGMA key = \"{}\";", lit.as_str()));
+    // SQLCipher logs failed page decryption (a wrong key is routine here) to stderr; the log carries no key
+    // material but is noise in device logs, so it is switched off before the key is applied.
+    Zeroizing::new(format!(
+        "PRAGMA cipher_log_level = NONE; PRAGMA key = \"{}\";",
+        lit.as_str()
+    ))
+}
+
+/// Returns the SQLCipher version, or nothing when the linked SQLite is not SQLCipher.
+pub const CIPHER_VERSION_SQL: &str = "PRAGMA cipher_version";
+
+fn apply_key(conn: &Connection, key: &DbKey) -> Result<(), SecureDbError> {
+    let sql = key_pragma(key);
     conn.execute_batch(&sql)?;
     let v: Result<String, _> = conn.query_row("PRAGMA cipher_version", [], |r| r.get(0));
     match v {
@@ -163,9 +190,11 @@ fn apply_key(conn: &Connection, key: &DbKey) -> Result<(), SecureDbError> {
 }
 
 fn check_readable(conn: &Connection) -> Result<(), SecureDbError> {
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .map(|_| ())
-        .map_err(|_| SecureDbError::KeyMismatchOrCorrupt)
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|_| ())
+    .map_err(|_| SecureDbError::KeyMismatchOrCorrupt)
 }
 
 /// Open an encrypted database read-write. With `create` a missing file is created encrypted from its first byte.
@@ -176,8 +205,12 @@ fn check_readable(conn: &Connection) -> Result<(), SecureDbError> {
 pub fn open(path: &Path, key: &DbKey, create: bool) -> Result<Connection, SecureDbError> {
     let fmt = detect(path)?;
     match fmt {
-        Format::Plaintext => return Err(SecureDbError::PlaintextRefused(path.display().to_string())),
-        Format::Missing if !create => return Err(SecureDbError::Missing(path.display().to_string())),
+        Format::Plaintext => {
+            return Err(SecureDbError::PlaintextRefused(path.display().to_string()));
+        }
+        Format::Missing if !create => {
+            return Err(SecureDbError::Missing(path.display().to_string()));
+        }
         _ => {}
     }
     let flags = if create {
@@ -190,6 +223,24 @@ pub fn open(path: &Path, key: &DbKey, create: bool) -> Result<Connection, Secure
     if fmt != Format::Missing {
         check_readable(&conn)?;
     }
+    Ok(conn)
+}
+
+/// Open an existing encrypted database read-only (a second connection for queries). Plaintext is refused.
+///
+/// # Errors
+/// See [`SecureDbError`].
+pub fn open_read_only(path: &Path, key: &DbKey) -> Result<Connection, SecureDbError> {
+    match detect(path)? {
+        Format::Plaintext => {
+            return Err(SecureDbError::PlaintextRefused(path.display().to_string()));
+        }
+        Format::Missing => return Err(SecureDbError::Missing(path.display().to_string())),
+        Format::NotPlaintext => {}
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    apply_key(&conn, key)?;
+    check_readable(&conn)?;
     Ok(conn)
 }
 
@@ -207,6 +258,152 @@ pub fn quick_check(conn: &Connection) -> Result<(), SecureDbError> {
         Ok(())
     } else {
         Err(SecureDbError::SourceCorrupt(rows.join("; ")))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Key resolution: how a store learns its key without every layer of the Wallet passing it down.
+
+/// Derives the key for one database from the store's `info` string and its (non-secret) salt. The Wallet registers
+/// one per unlocked vault; it derives from the vault's secret on demand and holds no key material between calls, so
+/// a locked vault can no longer open any database.
+pub type Resolver = std::sync::Arc<dyn Fn(&str, &[u8; 32]) -> Result<DbKey, String> + Send + Sync>;
+
+struct Registered {
+    prefix: String,
+    owner: u64,
+    resolver: Resolver,
+}
+
+static REGISTRY: std::sync::Mutex<Vec<Registered>> = std::sync::Mutex::new(Vec::new());
+static REQUIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Default salt (no rotation yet). A rotated store has its own salt file next to it, see [`salt_path`].
+#[must_use]
+pub fn default_salt() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&Sha256::digest(b"shadowallet db key salt v1"));
+    out
+}
+
+/// File holding the rotated salt of a database. Not secret; absent means [`default_salt`].
+#[must_use]
+pub fn salt_path(db: &Path) -> PathBuf {
+    side(db, ".keysalt")
+}
+
+fn read_salt(db: &Path) -> Result<[u8; 32], SecureDbError> {
+    match fs::read(salt_path(db)) {
+        Ok(v) => <[u8; 32]>::try_from(v.as_slice())
+            .map_err(|_| SecureDbError::Io("key salt file has the wrong size".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default_salt()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Register the key resolver for every database whose path starts with `prefix` (the vault path), owned by `owner`.
+pub fn register_resolver(prefix: &str, owner: u64, resolver: Resolver) {
+    if let Ok(mut g) = REGISTRY.lock() {
+        g.retain(|r| !(r.prefix == prefix && r.owner == owner));
+        g.push(Registered {
+            prefix: prefix.to_owned(),
+            owner,
+            resolver,
+        });
+    }
+}
+
+/// Remove the resolver of `owner` (vault locked or deleted).
+pub fn unregister_resolver(owner: u64) {
+    if let Ok(mut g) = REGISTRY.lock() {
+        g.retain(|r| r.owner != owner);
+    }
+}
+
+/// From now on opening any database that no resolver covers is an error instead of a plaintext open. The Wallet
+/// calls this once at start; a store that was forgotten fails loudly instead of leaving data unencrypted.
+pub fn require_encryption() {
+    REQUIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// How a path will be opened.
+pub enum Resolved {
+    Key(DbKey),
+    Plain,
+}
+
+/// Path text with one separator style, so that Windows and POSIX paths of the same file give the same key `info`.
+fn norm(s: &str) -> String {
+    s.replace(char::from(92u8), "/")
+}
+
+fn info_of(path: &Path, prefix: &str) -> String {
+    let full = norm(&path.to_string_lossy());
+    let pre = norm(prefix);
+    full[pre.len()..].trim_start_matches('.').to_owned()
+}
+
+/// Decide how `path` is opened: with a key (a resolver covers it), plain (no resolver and encryption not required),
+/// or not at all (required, but no resolver: the vault is locked, or a store was never wired up).
+///
+/// # Errors
+/// [`SecureDbError::NoKey`] when encryption is required and no key can be produced.
+pub fn resolve(path: &Path) -> Result<Resolved, SecureDbError> {
+    let full = norm(&path.to_string_lossy());
+    let hit = {
+        let g = REGISTRY
+            .lock()
+            .map_err(|_| SecureDbError::Io("key registry poisoned".into()))?;
+        g.iter()
+            .filter(|r| {
+                let pre = norm(&r.prefix);
+                full.starts_with(&pre)
+                    && matches!(full.as_bytes().get(pre.len()), Some(b'.' | b'/'))
+            })
+            .max_by_key(|r| r.prefix.len())
+            .map(|r| (r.prefix.clone(), r.resolver.clone()))
+    };
+    match hit {
+        Some((prefix, resolver)) => {
+            let salt = read_salt(path)?;
+            let info = info_of(path, &prefix);
+            resolver(&info, &salt)
+                .map(Resolved::Key)
+                .map_err(SecureDbError::NoKey)
+        }
+        None if REQUIRED.load(std::sync::atomic::Ordering::SeqCst) => Err(SecureDbError::NoKey(
+            format!("no key for {} (vault locked?)", path.display()),
+        )),
+        None => Ok(Resolved::Plain),
+    }
+}
+
+/// Resolve `path` and, when a key applies, bring the file to the encrypted state first: an interrupted earlier
+/// migration is completed or rolled back, a plaintext file is converted (verified, plaintext retained).
+/// `Ok(None)` means plain (no resolver and encryption not required).
+///
+/// # Errors
+/// See [`SecureDbError`].
+pub fn prepare(path: &Path) -> Result<Option<DbKey>, SecureDbError> {
+    match resolve(path)? {
+        Resolved::Plain => Ok(None),
+        Resolved::Key(k) => {
+            if detect(path)? != Format::Missing || has_retained(path) {
+                migrate_plaintext(path, &k, &|_| Ok(()), None)?;
+            }
+            Ok(Some(k))
+        }
+    }
+}
+
+/// [`prepare`] then open: encrypted when a key applies, plain otherwise.
+///
+/// # Errors
+/// See [`SecureDbError`].
+pub fn open_resolved(path: &Path) -> Result<Connection, SecureDbError> {
+    match prepare(path)? {
+        Some(k) => open(path, &k, true),
+        None => Ok(Connection::open(path)?),
     }
 }
 
@@ -231,7 +428,11 @@ pub enum Outcome {
     /// File already encrypted (and opened with the key), or created new: nothing to migrate.
     AlreadyEncrypted,
     /// Plaintext converted; the plaintext copy is retained at the returned path until [`retire_retained`].
-    Migrated { retained: PathBuf, tables: usize, rows: u64 },
+    Migrated {
+        retained: PathBuf,
+        tables: usize,
+        rows: u64,
+    },
     /// An interrupted earlier migration was completed or rolled back.
     Recovered(&'static str),
     NothingThere,
@@ -273,10 +474,8 @@ fn remove_with_sidecars(path: &Path) {
 
 fn sync_dir(path: &Path) {
     // Best effort: directory fsync is how a rename becomes durable on POSIX; it is a no-op where unsupported.
-    if let Some(dir) = path.parent() {
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
+    if let Some(Ok(d)) = path.parent().map(File::open) {
+        let _ = d.sync_all();
     }
 }
 
@@ -288,7 +487,9 @@ struct DbDigest {
 
 fn digest(conn: &Connection) -> Result<DbDigest, SecureDbError> {
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let mut st = conn.prepare("SELECT type, name, tbl_name, coalesce(sql,'') FROM sqlite_master ORDER BY type, name")?;
+    let mut st = conn.prepare(
+        "SELECT type, name, tbl_name, coalesce(sql,'') FROM sqlite_master ORDER BY type, name",
+    )?;
     let schema: Vec<(String, String, String, String)> = st
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<Result<_, _>>()?;
@@ -340,7 +541,11 @@ fn digest(conn: &Connection) -> Result<DbDigest, SecureDbError> {
         }
         tables.push((name, count, acc));
     }
-    Ok(DbDigest { tables, schema, user_version })
+    Ok(DbDigest {
+        tables,
+        schema,
+        user_version,
+    })
 }
 
 /// Make sure `path` is an encrypted database that opens with `key`, converting a plaintext one when needed.
@@ -379,7 +584,9 @@ pub fn migrate_plaintext(
         if tmp.exists() {
             // Crash between the two renames. Finish only if the encrypted copy is provably good.
             let good = open(&tmp, key, false)
-                .and_then(|c| quick_check(&c).and_then(|()| verify(&c).map_err(SecureDbError::Verification)))
+                .and_then(|c| {
+                    quick_check(&c).and_then(|()| verify(&c).map_err(SecureDbError::Verification))
+                })
                 .is_ok();
             if good {
                 fs::rename(&tmp, path)?;
@@ -409,7 +616,10 @@ pub fn migrate_plaintext(
 
     // 1. Source: open read-write (finishes any hot journal), fold the WAL into the main file, check integrity.
     // CREATE is needed only so that ATTACH can create the destination file; the source exists (checked above).
-    let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE)?;
+    let src = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     let _ = src.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     quick_check(&src)?;
     let before = digest(&src)?;
@@ -420,11 +630,18 @@ pub fn migrate_plaintext(
     let lit = key.pragma_literal();
     let tmp_str = tmp.to_string_lossy().into_owned();
     src.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    let attach = Zeroizing::new(format!("ATTACH DATABASE '{}' AS enc KEY \"{}\";", tmp_str.replace('\'', "''"), lit.as_str()));
+    let attach = Zeroizing::new(format!(
+        "ATTACH DATABASE '{}' AS enc KEY \"{}\";",
+        tmp_str.replace('\'', "''"),
+        lit.as_str()
+    ));
     src.execute_batch(&attach)?;
     hit(MigrationStep::DuringCopy)?;
     src.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(()))?;
-    src.execute_batch(&format!("PRAGMA enc.user_version = {};", before.user_version))?;
+    src.execute_batch(&format!(
+        "PRAGMA enc.user_version = {};",
+        before.user_version
+    ))?;
     src.execute_batch("DETACH DATABASE enc;")?;
     drop(src);
 
@@ -445,7 +662,10 @@ pub fn migrate_plaintext(
         }
         for (a, b) in before.tables.iter().zip(after.tables.iter()) {
             if a != b {
-                return Err(SecureDbError::Verification(format!("table {} differs (rows or content)", a.0)));
+                return Err(SecureDbError::Verification(format!(
+                    "table {} differs (rows or content)",
+                    a.0
+                )));
             }
         }
         verify(&enc).map_err(SecureDbError::Verification)?;
@@ -459,7 +679,9 @@ pub fn migrate_plaintext(
     }
     // The encrypted file must not be readable as plaintext.
     if detect(&tmp)? != Format::NotPlaintext {
-        return Err(SecureDbError::Verification("the migrated file is not encrypted".into()));
+        return Err(SecureDbError::Verification(
+            "the migrated file is not encrypted".into(),
+        ));
     }
     {
         let f = OpenOptions::new().write(true).open(&tmp)?;
@@ -475,7 +697,11 @@ pub fn migrate_plaintext(
     hit(MigrationStep::AfterActivate)?;
 
     let rows = before.tables.iter().map(|t| t.1).sum();
-    Ok(Outcome::Migrated { retained: kept, tables: before.tables.len(), rows })
+    Ok(Outcome::Migrated {
+        retained: kept,
+        tables: before.tables.len(),
+        rows,
+    })
 }
 
 /// Overwrite with zeros and delete the plaintext copy kept by a migration. Explicit by design: call it only after
@@ -550,7 +776,11 @@ mod tests {
         )
         .unwrap();
         for i in 0..500 {
-            c.execute("INSERT INTO notes(acct,v,memo) VALUES (1,?1,?2)", rusqlite::params![i, vec![7u8; 40]]).unwrap();
+            c.execute(
+                "INSERT INTO notes(acct,v,memo) VALUES (1,?1,?2)",
+                rusqlite::params![i, vec![7u8; 40]],
+            )
+            .unwrap();
         }
     }
 
@@ -560,8 +790,14 @@ mod tests {
     }
 
     fn ok_verify(c: &Connection) -> Result<(), String> {
-        let n: i64 = c.query_row("SELECT count(*) FROM accounts", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-        if n == 1 { Ok(()) } else { Err("accounts".into()) }
+        let n: i64 = c
+            .query_row("SELECT count(*) FROM accounts", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if n == 1 {
+            Ok(())
+        } else {
+            Err("accounts".into())
+        }
     }
 
     #[test]
@@ -570,10 +806,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.sqlite");
         let c = open(&p, &key(1), true).unwrap();
-        c.execute_batch("CREATE TABLE t(x TEXT); INSERT INTO t VALUES('findmeVIEWINGKEY');").unwrap();
+        c.execute_batch("CREATE TABLE t(x TEXT); INSERT INTO t VALUES('findmeVIEWINGKEY');")
+            .unwrap();
         drop(c);
         assert_eq!(detect(&p).unwrap(), Format::NotPlaintext);
-        assert!(!contains(&p, b"findmeVIEWINGKEY"), "plaintext visible in the file bytes");
+        assert!(
+            !contains(&p, b"findmeVIEWINGKEY"),
+            "plaintext visible in the file bytes"
+        );
         assert!(!contains(&p, b"SQLite format 3"));
     }
 
@@ -581,12 +821,25 @@ mod tests {
     fn wrong_key_and_plaintext_are_refused() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.sqlite");
-        drop(open(&p, &key(1), true).unwrap().execute_batch("CREATE TABLE t(x)"));
-        assert!(matches!(open(&p, &key(2), false), Err(SecureDbError::KeyMismatchOrCorrupt)));
+        drop(
+            open(&p, &key(1), true)
+                .unwrap()
+                .execute_batch("CREATE TABLE t(x)"),
+        );
+        assert!(matches!(
+            open(&p, &key(2), false),
+            Err(SecureDbError::KeyMismatchOrCorrupt)
+        ));
         let q = d.path().join("plain.sqlite");
         make_plain(&q);
-        assert!(matches!(open(&q, &key(1), false), Err(SecureDbError::PlaintextRefused(_))));
-        assert!(matches!(open(&d.path().join("nope"), &key(1), false), Err(SecureDbError::Missing(_))));
+        assert!(matches!(
+            open(&q, &key(1), false),
+            Err(SecureDbError::PlaintextRefused(_))
+        ));
+        assert!(matches!(
+            open(&d.path().join("nope"), &key(1), false),
+            Err(SecureDbError::Missing(_))
+        ));
     }
 
     #[test]
@@ -594,16 +847,24 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.sqlite");
         let c = open(&p, &key(1), true).unwrap();
-        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);").unwrap();
+        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+            .unwrap();
         drop(c);
         let mut data = fs::read(&p).unwrap();
         let n = data.len();
         data[n - 100] ^= 0x55;
         fs::write(&p, data).unwrap();
-        let r = open(&p, &key(1), false).and_then(|c| quick_check(&c).map(|()| c)).and_then(|c| {
-            c.query_row("SELECT sum(x) FROM t", [], |r| r.get::<_, i64>(0)).map(|_| ()).map_err(Into::into)
-        });
-        assert!(r.is_err(), "a modified encrypted page must not read back as valid");
+        let r = open(&p, &key(1), false)
+            .and_then(|c| quick_check(&c).map(|()| c))
+            .and_then(|c| {
+                c.query_row("SELECT sum(x) FROM t", [], |r| r.get::<_, i64>(0))
+                    .map(|_| ())
+                    .map_err(Into::into)
+            });
+        assert!(
+            r.is_err(),
+            "a modified encrypted page must not read back as valid"
+        );
     }
 
     #[test]
@@ -613,19 +874,39 @@ mod tests {
         make_plain(&p);
         assert!(contains(&p, b"SECRETVIEWINGKEYMARKER"));
         let out = migrate_plaintext(&p, &key(9), &ok_verify, None).unwrap();
-        let Outcome::Migrated { retained, tables, rows } = out else { panic!("{out:?}") };
+        let Outcome::Migrated {
+            retained,
+            tables,
+            rows,
+        } = out
+        else {
+            panic!("{out:?}")
+        };
         assert!(tables >= 2 && rows == 501);
-        assert!(!contains(&p, b"SECRETVIEWINGKEYMARKER"), "live file still shows the viewing key");
+        assert!(
+            !contains(&p, b"SECRETVIEWINGKEYMARKER"),
+            "live file still shows the viewing key"
+        );
         assert!(retained.exists() && has_retained(&p));
         let c = open(&p, &key(9), false).unwrap();
-        let uv: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let uv: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(uv, 8);
-        let n: i64 = c.query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
+        let n: i64 = c
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 500);
         // the plaintext can no longer be reopened as the wallet database
-        assert!(matches!(open(&retained, &key(9), false), Err(SecureDbError::PlaintextRefused(_))));
+        assert!(matches!(
+            open(&retained, &key(9), false),
+            Err(SecureDbError::PlaintextRefused(_))
+        ));
         // idempotent
-        assert_eq!(migrate_plaintext(&p, &key(9), &ok_verify, None).unwrap(), Outcome::AlreadyEncrypted);
+        assert_eq!(
+            migrate_plaintext(&p, &key(9), &ok_verify, None).unwrap(),
+            Outcome::AlreadyEncrypted
+        );
         // explicit retirement
         drop(c);
         assert_eq!(retire_retained(&p).unwrap(), 1);
@@ -648,22 +929,46 @@ mod tests {
     #[test]
     fn every_interruption_point_keeps_the_data() {
         use MigrationStep::*;
-        for step in [BeforeStart, DuringCreate, DuringCopy, BeforeVerify, BetweenRenames, AfterActivate] {
+        for step in [
+            BeforeStart,
+            DuringCreate,
+            DuringCopy,
+            BeforeVerify,
+            BetweenRenames,
+            AfterActivate,
+        ] {
             let d = tempfile::tempdir().unwrap();
             let p = d.path().join("w.sqlite");
             make_plain(&p);
             let r = migrate_plaintext(&p, &key(5), &ok_verify, Some(step));
-            assert!(matches!(r, Err(SecureDbError::Interrupted(s)) if s == step), "{step:?}: {r:?}");
+            assert!(
+                matches!(r, Err(SecureDbError::Interrupted(s)) if s == step),
+                "{step:?}: {r:?}"
+            );
             // next start
             let out = migrate_plaintext(&p, &key(5), &ok_verify, None).unwrap();
             // whatever state it was in, the wallet data must now open with the key and hold all rows
-            let c = open(&p, &key(5), false).unwrap_or_else(|e| panic!("{step:?}: {e}; outcome {out:?}"));
-            let n: i64 = c.query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
+            let c = open(&p, &key(5), false)
+                .unwrap_or_else(|e| panic!("{step:?}: {e}; outcome {out:?}"));
+            let n: i64 = c
+                .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(n, 500, "{step:?}");
-            assert!(!contains(&p, b"SECRETVIEWINGKEYMARKER"), "{step:?}: live file is plaintext");
+            assert!(
+                !contains(&p, b"SECRETVIEWINGKEYMARKER"),
+                "{step:?}: live file is plaintext"
+            );
             // a plaintext copy exists only as the explicitly named retained file
-            let entries: Vec<_> = fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
-            assert!(entries.iter().all(|n| n == "w.sqlite" || n.ends_with(".plaintext-retained")), "{step:?}: {entries:?}");
+            let entries: Vec<_> = fs::read_dir(d.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                entries
+                    .iter()
+                    .all(|n| n == "w.sqlite" || n.ends_with(".plaintext-retained")),
+                "{step:?}: {entries:?}"
+            );
         }
     }
 
@@ -691,12 +996,17 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.sqlite");
         let c = open(&p, &key(1), true).unwrap();
-        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(42);").unwrap();
+        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(42);")
+            .unwrap();
         rekey(&c, &key(2)).unwrap();
         drop(c);
         assert!(open(&p, &key(1), false).is_err());
         let c = open(&p, &key(2), false).unwrap();
-        assert_eq!(c.query_row("SELECT x FROM t", [], |r| r.get::<_, i64>(0)).unwrap(), 42);
+        assert_eq!(
+            c.query_row("SELECT x FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
     }
 
     #[test]

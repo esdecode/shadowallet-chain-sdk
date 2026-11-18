@@ -12,6 +12,7 @@ keywords = ["tron", "trc20", "wallet", "transaction"]
 categories = ["cryptography", "finance"]
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true

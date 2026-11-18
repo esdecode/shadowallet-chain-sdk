@@ -52,8 +52,25 @@ fn h32(v: Vec<u8>) -> Result<[u8; 32], rusqlite::Error> {
 }
 
 impl MoneroStore {
+    /// Open the database. Encrypted when the Wallet registered a key resolver for this path (a plaintext file is
+    /// migrated first); with encryption required and no key the open fails; otherwise plain (tests).
     pub fn open(path: &Path) -> Result<Self, MoneroError> {
-        let conn = Connection::open(path).map_err(db)?;
+        let conn = shadowallet_chain_securedb::open_resolved(path)
+            .map_err(|e| MoneroError::Store(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    /// Open (or create) the database encrypted with SQLCipher. A plaintext file is refused.
+    pub fn open_encrypted(
+        path: &Path,
+        key: &shadowallet_chain_securedb::DbKey,
+    ) -> Result<Self, MoneroError> {
+        let conn = shadowallet_chain_securedb::open(path, key, true)
+            .map_err(|e| MoneroError::Store(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    fn init(conn: Connection) -> Result<Self, MoneroError> {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS xmr_meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);

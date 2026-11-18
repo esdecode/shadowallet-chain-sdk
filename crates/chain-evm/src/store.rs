@@ -84,8 +84,22 @@ fn now() -> i64 {
 }
 
 impl EvmStore {
+    /// Open the database. Encrypted when the Wallet registered a key resolver for this path (a plaintext file is
+    /// migrated first); with encryption required and no key the open fails; otherwise plain (tests).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EvmError> {
-        Self::init(Connection::open(path).map_err(store_err)?)
+        let conn = shadowallet_chain_securedb::open_resolved(path.as_ref())
+            .map_err(|e| EvmError::Store(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    /// Open (or create) the database encrypted with SQLCipher. A plaintext file is refused.
+    pub fn open_encrypted(
+        path: impl AsRef<Path>,
+        key: &shadowallet_chain_securedb::DbKey,
+    ) -> Result<Self, EvmError> {
+        let conn = shadowallet_chain_securedb::open(path.as_ref(), key, true)
+            .map_err(|e| EvmError::Store(e.to_string()))?;
+        Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self, EvmError> {

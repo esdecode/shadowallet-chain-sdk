@@ -20,6 +20,10 @@ allow = [
   "OpenSSL",
   "MITNFA",
   "CDLA-Permissive-2.0",
+  # sqlcipher-src (SQLCipher + SQLite + LibTomCrypt sources): BSD-3-Clause, SQLite's public-domain blessing, and
+  # LibTomCrypt's public-domain-or-WTFPL grant. All permissive; WTFPL imposes no condition at all.
+  "blessing",
+  "WTFPL",
 ]
 confidence-threshold = 0.9
 

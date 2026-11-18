@@ -53,8 +53,25 @@ fn db(e: rusqlite::Error) -> TronError {
 }
 
 impl TronStore {
+    /// Open the database. Encrypted when the Wallet registered a key resolver for this path (a plaintext file is
+    /// migrated first); with encryption required and no key the open fails; otherwise plain (tests).
     pub fn open(path: &Path) -> Result<Self, TronError> {
-        let conn = Connection::open(path).map_err(db)?;
+        let conn = shadowallet_chain_securedb::open_resolved(path)
+            .map_err(|e| TronError::Store(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    /// Open (or create) the database encrypted with SQLCipher. A plaintext file is refused.
+    pub fn open_encrypted(
+        path: &Path,
+        key: &shadowallet_chain_securedb::DbKey,
+    ) -> Result<Self, TronError> {
+        let conn = shadowallet_chain_securedb::open(path, key, true)
+            .map_err(|e| TronError::Store(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    fn init(conn: Connection) -> Result<Self, TronError> {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS tron_meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);

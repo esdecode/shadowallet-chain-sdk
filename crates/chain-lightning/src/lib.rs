@@ -197,8 +197,24 @@ pub struct MonitorStore {
 }
 
 impl MonitorStore {
+    /// Open (or create) the store encrypted with SQLCipher. A plaintext file is refused.
+    pub fn open_encrypted(
+        path: &Path,
+        key: &shadowallet_chain_securedb::DbKey,
+    ) -> Result<Self, LnError> {
+        let conn = shadowallet_chain_securedb::open(path, key, true)
+            .map_err(|e| LnError::Storage(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    /// Open the store. Encrypted when a key resolver is registered for this path; plain otherwise (tests).
     pub fn open(path: &Path) -> Result<Self, LnError> {
-        let conn = Connection::open(path).map_err(db)?;
+        let conn = shadowallet_chain_securedb::open_resolved(path)
+            .map_err(|e| LnError::Storage(e.to_string()))?;
+        Self::init(conn)
+    }
+
+    fn init(conn: Connection) -> Result<Self, LnError> {
         let check: String = conn
             .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
             .map_err(|e| LnError::Corrupt(e.to_string()))?;

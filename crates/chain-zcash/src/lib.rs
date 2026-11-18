@@ -24,6 +24,7 @@ pub use sync::{
 };
 pub use wallet::{
     Client, Db, MemBlockCache, ServerInfo, ZcashWallet, connect, latest_height, open_wallet,
+    open_wallet_encrypted,
 };
 
 #[derive(Debug, thiserror::Error)]

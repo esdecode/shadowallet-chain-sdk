@@ -205,12 +205,15 @@ pub struct ZcashWallet {
     pub net: ZcashNet,
     pub db: Db,
     pub db_path: PathBuf,
+    /// Present when the database is encrypted: needed by the read-only query connections.
+    pub db_key: Option<shadowallet_chain_securedb::DbKey>,
     pub account: AccountUuid,
     pub ufvk: UnifiedFullViewingKey,
 }
 
-/// Open (or create) the wallet database and the account for `seed`. A new account needs a birthday (the height
-/// scanning starts from): `birthday_height` of `None` restores from Sapling activation. New wallets must explicitly provide a recent birthday.
+/// Open (or create) the wallet database and the account for `seed` (tests and non-sensitive use). The Wallet
+/// uses [`open_wallet_encrypted`]. A new account needs a birthday (the height scanning starts from): `birthday_height`
+/// of `None` restores from Sapling activation. New wallets must explicitly provide a recent birthday.
 pub async fn open_wallet(
     net: ZcashNet,
     db_path: &Path,
@@ -219,15 +222,109 @@ pub async fn open_wallet(
     client: &mut Client,
     birthday_height: Option<u32>,
 ) -> Result<ZcashWallet, ZcashError> {
+    // A key resolver registered by the Wallet applies here (a plaintext file is migrated first); with none, plain.
+    let key = shadowallet_chain_securedb::prepare(db_path)
+        .map_err(|e| ZcashError::Wallet(e.to_string()))?;
+    open_wallet_inner(
+        net,
+        db_path,
+        key.as_ref(),
+        seed,
+        account_index,
+        client,
+        birthday_height,
+    )
+    .await
+}
+
+/// Like [`open_wallet`], but the database file is encrypted with SQLCipher under `db_key`. A plaintext file is
+/// refused (migrate it first with `shadowallet_chain_securedb::migrate_plaintext`).
+pub async fn open_wallet_encrypted(
+    net: ZcashNet,
+    db_path: &Path,
+    db_key: &shadowallet_chain_securedb::DbKey,
+    seed: &[u8],
+    account_index: u32,
+    client: &mut Client,
+    birthday_height: Option<u32>,
+) -> Result<ZcashWallet, ZcashError> {
+    open_wallet_inner(
+        net,
+        db_path,
+        Some(db_key),
+        seed,
+        account_index,
+        client,
+        birthday_height,
+    )
+    .await
+}
+
+/// Open the SQLite connection, keyed when a key is given. The linked SQLite must be SQLCipher; a plain SQLite
+/// would silently ignore the key and leave the file readable, so that case is an error.
+pub(crate) fn connect_db(
+    db_path: &Path,
+    key: Option<&shadowallet_chain_securedb::DbKey>,
+    read_only: bool,
+) -> Result<rusqlite::Connection, ZcashError> {
+    use shadowallet_chain_securedb as sdb;
+    let Some(key) = key else {
+        return rusqlite::Connection::open(db_path).map_err(wallet);
+    };
+    if sdb::detect(db_path).map_err(|e| ZcashError::Wallet(e.to_string()))?
+        == sdb::Format::Plaintext
+    {
+        return Err(ZcashError::Wallet(
+            "the wallet database is a plaintext file; refusing to use it as an encrypted one"
+                .to_owned(),
+        ));
+    }
+    let flags = if read_only {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+    };
+    let conn = rusqlite::Connection::open_with_flags(db_path, flags).map_err(wallet)?;
+    conn.execute_batch(&sdb::key_pragma(key)).map_err(wallet)?;
+    let ver: String = conn
+        .query_row(sdb::CIPHER_VERSION_SQL, [], |r| r.get(0))
+        .map_err(|_| ZcashError::Wallet("the linked SQLite is not SQLCipher".to_owned()))?;
+    if ver.is_empty() {
+        return Err(ZcashError::Wallet(
+            "the linked SQLite is not SQLCipher".to_owned(),
+        ));
+    }
+    // Reading the schema proves the key is right and the file is intact enough to decrypt.
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map_err(|_| {
+        ZcashError::Wallet(
+            "the database key does not match, or the encrypted file is damaged".to_owned(),
+        )
+    })?;
+    Ok(conn)
+}
+
+async fn open_wallet_inner(
+    net: ZcashNet,
+    db_path: &Path,
+    db_key: Option<&shadowallet_chain_securedb::DbKey>,
+    seed: &[u8],
+    account_index: u32,
+    client: &mut Client,
+    birthday_height: Option<u32>,
+) -> Result<ZcashWallet, ZcashError> {
     net.validate()?;
     let params = net.params();
-    let mut db: Db = WalletDb::for_path(
-        db_path,
+    let conn = connect_db(db_path, db_key, false)?;
+    rusqlite::vtab::array::load_module(&conn).map_err(wallet)?;
+    let mut db: Db = WalletDb::from_connection(
+        conn,
         params,
         SystemClock,
         rand_core::UnwrapErr(rand::rngs::SysRng),
-    )
-    .map_err(wallet)?;
+    );
     init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).map_err(wallet)?;
     let ufvk = crate::account::full_viewing_key(net, seed, account_index)?;
     let account = match db.get_account_for_ufvk(&ufvk).map_err(wallet)? {
@@ -276,6 +373,7 @@ pub async fn open_wallet(
         net,
         db,
         db_path: db_path.to_path_buf(),
+        db_key: db_key.cloned(),
         account,
         ufvk,
     })

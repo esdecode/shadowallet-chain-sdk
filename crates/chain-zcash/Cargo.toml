@@ -12,6 +12,7 @@ keywords = ["zcash", "orchard", "shielded", "wallet"]
 categories = ["cryptography", "finance"]
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 zcash_client_backend = { version = "0.25", default-features = false, features = ["lightwalletd-tonic", "lightwalletd-tonic-tls-webpki-roots", "orchard", "transparent-inputs", "sync", "zeroize"] }
 zcash_client_sqlite = { version = "0.23", default-features = false, features = ["orchard", "transparent-inputs"] }
 zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs", "zeroize"] }

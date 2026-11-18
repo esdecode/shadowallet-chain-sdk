@@ -13,6 +13,7 @@ categories = ["cryptography", "finance"]
 description = "Watch-only Bitcoin (BDK) synchronization, PSBT construction and finalization."
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 shadowallet-chain-utxo = { path = "../chain-utxo", version = "0.1.0-alpha.1" }
 bdk_bitcoind_rpc.workspace = true
 bdk_chain.workspace = true

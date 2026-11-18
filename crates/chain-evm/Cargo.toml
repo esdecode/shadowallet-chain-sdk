@@ -13,6 +13,7 @@ keywords = ["ethereum", "evm", "wallet", "transaction"]
 categories = ["cryptography", "finance"]
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 bytes.workspace = true
 hex.workspace = true
 primitive-types.workspace = true

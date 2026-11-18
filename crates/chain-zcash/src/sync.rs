@@ -336,11 +336,7 @@ pub struct TxRow {
 
 /// Transaction history from the wallet database's `v_transactions` view (read-only second connection).
 pub fn history(w: &ZcashWallet, limit: u32) -> Result<Vec<TxRow>, ZcashError> {
-    let conn = rusqlite::Connection::open_with_flags(
-        &w.db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(wallet)?;
+    let conn = crate::wallet::connect_db(&w.db_path, w.db_key.as_ref(), true)?;
     let account_uuid = w.account.expose_uuid();
     let mut stmt = conn
         .prepare(

@@ -12,6 +12,7 @@ keywords = ["monero", "wallet", "ringct"]
 categories = ["cryptography", "finance"]
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 monero-wallet = "0.2.0"
 monero-daemon-rpc = "0.2.0"
 hex.workspace = true

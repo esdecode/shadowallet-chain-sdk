@@ -43,6 +43,8 @@ pub enum SqliteStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("changeset serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("encrypted storage: {0}")]
+    Secure(String),
     #[error("legacy BDK wallet schema is incompatible: {0}")]
     UnsupportedLegacy(String),
     #[error("legacy BDK wallet data is corrupt: {0}")]
@@ -61,9 +63,22 @@ impl std::fmt::Debug for SqliteStore {
 }
 
 impl SqliteStore {
-    /// Open (or create) the wallet database at `path`.
+    /// Open (or create) the wallet database at `path`. Encrypted when the Wallet registered a key resolver for this
+    /// path (a plaintext file is migrated first); with encryption required and no key the open fails; otherwise
+    /// plain (tests).
     pub fn open(path: &Path) -> Result<Self, SqliteStoreError> {
-        let conn = Connection::open(path)?;
+        let conn = shadowallet_chain_securedb::open_resolved(path)
+            .map_err(|e| SqliteStoreError::Secure(e.to_string()))?;
+        Self::from_connection(conn)
+    }
+
+    /// Open (or create) the wallet database encrypted with SQLCipher. A plaintext file is refused.
+    pub fn open_encrypted(
+        path: &Path,
+        key: &shadowallet_chain_securedb::DbKey,
+    ) -> Result<Self, SqliteStoreError> {
+        let conn = shadowallet_chain_securedb::open(path, key, true)
+            .map_err(|e| SqliteStoreError::Secure(e.to_string()))?;
         Self::from_connection(conn)
     }
 

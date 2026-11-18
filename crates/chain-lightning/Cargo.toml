@@ -12,6 +12,7 @@ keywords = ["lightning", "ldk", "wallet"]
 categories = ["cryptography", "finance"]
 
 [dependencies]
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 # Stable releases of the maintained Lightning Development Kit, pinned exactly.
 lightning = { version = "=0.2.8", default-features = false, features = ["std"] }
 lightning-invoice = { version = "=0.34.2", default-features = false, features = ["std"] }
