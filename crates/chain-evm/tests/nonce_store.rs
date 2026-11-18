@@ -279,3 +279,180 @@ fn rejection_keeps_the_nonce_when_a_later_row_is_active() {
     store.mark_rejected(first.id, "rejected").unwrap();
     assert_eq!(store.next_nonce(ANVIL.chain_id, ADDR).unwrap(), Some(2));
 }
+
+use shadowallet_chain_evm::CancelOutcome;
+
+fn reserve(store: &EvmStore, network: u64) -> (i64, u64) {
+    let r = store
+        .reserve_nonce(ANVIL.chain_id, ADDR, network, &draft())
+        .unwrap();
+    (r.id, r.nonce)
+}
+
+fn status_of(store: &EvmStore, id: i64) -> String {
+    store
+        .history(ANVIL.chain_id, ADDR, 100, None)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap()
+        .status
+}
+
+fn open_store() -> EvmStore {
+    let store = EvmStore::open_in_memory().unwrap();
+    store.register_account(ANVIL.chain_id, ADDR).unwrap();
+    store
+}
+
+#[test]
+fn cancel_before_signing_releases_the_nonce_and_is_idempotent() {
+    let store = open_store();
+    let (id, nonce) = reserve(&store, 0);
+    assert_eq!(nonce, 0);
+    assert_eq!(
+        store.cancel_reservation(id).unwrap(),
+        CancelOutcome::Released
+    );
+    assert_eq!(
+        store.cancel_reservation(id).unwrap(),
+        CancelOutcome::AlreadyReleased
+    );
+    assert_eq!(
+        store.cancel_reservation(9999).unwrap(),
+        CancelOutcome::NotFound
+    );
+    assert_eq!(
+        reserve(&store, 0).1,
+        0,
+        "the released nonce is handed out again"
+    );
+}
+
+#[test]
+fn a_cancelled_reservation_can_never_be_signed() {
+    let store = open_store();
+    let (id, _) = reserve(&store, 0);
+    store.cancel_reservation(id).unwrap();
+    assert!(
+        store.mark_signed(id, "0x01", "0x01").is_err(),
+        "sign after cancel must fail"
+    );
+    assert!(store.mark_broadcast(id, "0x01", "0x01").is_err());
+    assert_eq!(status_of(&store, id), "failed");
+}
+
+#[test]
+fn a_signed_or_later_reservation_is_never_cancelled() {
+    let store = open_store();
+    let (signed, _) = reserve(&store, 0);
+    let (unknown, _) = reserve(&store, 0);
+    let (pending, _) = reserve(&store, 0);
+    let (confirmed, _) = reserve(&store, 0);
+    store.mark_signed(signed, "0xa1", "0x01").unwrap();
+    store.mark_signed(unknown, "0xa2", "0x02").unwrap();
+    store.mark_broadcast_unknown(unknown, "timeout").unwrap();
+    store.mark_signed(pending, "0xa3", "0x03").unwrap();
+    store.mark_broadcast(pending, "0xa3", "0x03").unwrap();
+    store.mark_receipt(confirmed, 5, true).unwrap();
+    for (id, expect) in [
+        (signed, "signed"),
+        (unknown, "broadcast_unknown"),
+        (pending, "pending"),
+        (confirmed, "confirmed"),
+    ] {
+        assert_eq!(
+            store.cancel_reservation(id).unwrap(),
+            CancelOutcome::Retained(expect.to_owned())
+        );
+        assert_eq!(status_of(&store, id), expect, "state untouched");
+    }
+}
+
+#[test]
+fn cancelling_a_lower_nonce_leaves_a_hole_that_is_filled_not_skipped() {
+    let store = open_store();
+    let (a, na) = reserve(&store, 0);
+    let (_b, nb) = reserve(&store, 0);
+    assert_eq!((na, nb), (0, 1));
+    store.cancel_reservation(a).unwrap();
+    assert_eq!(reserve(&store, 0).1, 0, "the hole at 0 is filled first");
+    assert_eq!(
+        reserve(&store, 0).1,
+        2,
+        "then allocation continues above the stack"
+    );
+}
+
+#[test]
+fn holes_below_the_network_nonce_and_hash_bearing_rows_are_never_reused() {
+    let store = open_store();
+    let (a, _) = reserve(&store, 0);
+    store.cancel_reservation(a).unwrap();
+    assert_eq!(reserve(&store, 5).1, 5, "the network already consumed 0..4");
+    // A failed row that ever carried a hash keeps its nonce protected.
+    let store = open_store();
+    let (a, _) = reserve(&store, 0);
+    let (_b, _) = reserve(&store, 0);
+    store.mark_signed(a, "0xdead", "0x01").unwrap();
+    store.mark_failed(a, "unclear").unwrap();
+    assert_eq!(
+        reserve(&store, 0).1,
+        2,
+        "nonce 0 may be on the network: not reused"
+    );
+}
+
+#[test]
+fn release_abandoned_frees_only_unsigned_rows_and_honours_keep() {
+    let store = open_store();
+    let (kept, _) = reserve(&store, 0);
+    let (orphan, _) = reserve(&store, 0);
+    let (signed, _) = reserve(&store, 0);
+    let (unknown, _) = reserve(&store, 0);
+    store.mark_signed(signed, "0xb1", "0x01").unwrap();
+    store.mark_signed(unknown, "0xb2", "0x02").unwrap();
+    store.mark_broadcast_unknown(unknown, "reset").unwrap();
+    assert_eq!(
+        store
+            .release_abandoned(ANVIL.chain_id, ADDR, &[kept])
+            .unwrap(),
+        1
+    );
+    assert_eq!(status_of(&store, kept), "reserved");
+    assert_eq!(status_of(&store, orphan), "failed");
+    assert_eq!(status_of(&store, signed), "signed");
+    assert_eq!(status_of(&store, unknown), "broadcast_unknown");
+    assert_eq!(
+        store
+            .release_abandoned(ANVIL.chain_id, ADDR, &[kept])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        reserve(&store, 0).1,
+        1,
+        "the abandoned nonce 1 is reused, 2 and 3 stay protected"
+    );
+}
+
+#[test]
+fn nonce_state_is_separate_per_chain_and_per_address() {
+    let store = open_store();
+    store.register_account(1, ADDR).unwrap();
+    let other = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
+    store.register_account(ANVIL.chain_id, other).unwrap();
+    let (a, _) = reserve(&store, 0);
+    let on_other_chain = store.reserve_nonce(1, ADDR, 0, &draft()).unwrap();
+    let other_address = store
+        .reserve_nonce(ANVIL.chain_id, other, 0, &draft())
+        .unwrap();
+    assert_eq!((on_other_chain.nonce, other_address.nonce), (0, 0));
+    store.cancel_reservation(a).unwrap();
+    assert_eq!(store.release_abandoned(1, ADDR, &[]).unwrap(), 1);
+    assert_eq!(
+        store.release_abandoned(ANVIL.chain_id, other, &[]).unwrap(),
+        1
+    );
+    assert_eq!(status_of(&store, a), "failed");
+}

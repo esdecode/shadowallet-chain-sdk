@@ -45,6 +45,19 @@ pub struct ReservedTransaction {
     pub nonce: u64,
 }
 
+/// Result of [`EvmStore::cancel_reservation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The reservation was unsigned and is now released.
+    Released,
+    /// It had already been cancelled or abandoned (repeat call).
+    AlreadyReleased,
+    /// It is past `reserved` (signed, broadcast, pending, unknown or final): kept untouched.
+    Retained(String),
+    /// No such row.
+    NotFound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredTransaction {
     pub id: i64,
@@ -274,7 +287,28 @@ impl EvmStore {
             )
             .optional()
             .map_err(store_err)?;
-        let next = stored.unwrap_or(0).max(to_i64(network_nonce)?).max(0);
+        let floor = to_i64(network_nonce)?.max(0);
+        let top = stored.unwrap_or(0).max(floor);
+        // A nonce below the high-water mark is reusable only when it is a hole: the node expects it
+        // (>= network nonce) and no row at that nonce is still alive or ever carried a hash/raw
+        // transaction. Such holes appear when an unsigned reservation was cancelled or abandoned;
+        // leaving one empty would queue every later transaction behind it forever.
+        let taken: std::collections::HashSet<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT DISTINCT nonce FROM evm_tx
+                     WHERE chain_id = ?1 AND address = ?2 AND nonce >= ?3 AND nonce < ?4
+                       AND (status != 'failed' OR tx_hash IS NOT NULL OR raw_tx IS NOT NULL)",
+                )
+                .map_err(store_err)?;
+            let rows = stmt
+                .query_map(params![to_i64(chain_id)?, address, floor, top], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(store_err)?;
+            rows.collect::<Result<_, _>>().map_err(store_err)?
+        };
+        let next = (floor..top).find(|n| !taken.contains(n)).unwrap_or(top);
         let timestamp = now();
         tx.execute(
             "INSERT INTO evm_tx
@@ -301,7 +335,7 @@ impl EvmStore {
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(chain_id, address) DO UPDATE
              SET next_nonce = excluded.next_nonce, updated_at = excluded.updated_at",
-            params![to_i64(chain_id)?, address, next + 1, timestamp],
+            params![to_i64(chain_id)?, address, top.max(next + 1), timestamp],
         )
         .map_err(store_err)?;
         tx.commit().map_err(store_err)?;
@@ -309,6 +343,103 @@ impl EvmStore {
             id,
             nonce: u64::try_from(next).map_err(|_| EvmError::NonceConflict)?,
         })
+    }
+
+    /// Cancel one reservation that was never signed. Idempotent, atomic with respect to
+    /// [`Self::mark_signed`]: both are conditional on `status = 'reserved'` inside one write
+    /// transaction, so a cancelled row can never be signed afterwards and a signed row is never
+    /// cancelled. Anything past `reserved` (signed, broadcast, pending, unknown, final) is left
+    /// exactly as it is.
+    pub fn cancel_reservation(&self, id: i64) -> Result<CancelOutcome, EvmError> {
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store_err)?;
+        let row: Option<(i64, String, i64, String, Option<String>)> = tx
+            .query_row(
+                "SELECT chain_id, address, nonce, status, error FROM evm_tx WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let Some((chain_id, address, nonce, status, error)) = row else {
+            return Ok(CancelOutcome::NotFound);
+        };
+        if status == "failed" && matches!(error.as_deref(), Some("cancelled" | "abandoned")) {
+            return Ok(CancelOutcome::AlreadyReleased);
+        }
+        if status != "reserved" {
+            return Ok(CancelOutcome::Retained(status));
+        }
+        tx.execute(
+            "UPDATE evm_tx SET status = 'failed', error = 'cancelled', updated_at = ?2
+             WHERE id = ?1 AND status = 'reserved'",
+            params![id, now()],
+        )
+        .map_err(store_err)?;
+        // Top of the stack: hand the nonce back directly. Otherwise it is a hole that the next
+        // reservation fills (see `reserve_nonce`).
+        tx.execute(
+            "UPDATE evm_nonce SET next_nonce = ?3, updated_at = ?4
+             WHERE chain_id = ?1 AND address = ?2 AND next_nonce = ?3 + 1",
+            params![chain_id, address, nonce, now()],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(CancelOutcome::Released)
+    }
+
+    /// Release every never-signed reservation of an account except the ones in `keep` (the
+    /// reservations a live proposal still owns). Meant for account activation, when whatever
+    /// session created an older reservation is gone. Signed, broadcast, pending, unknown and final
+    /// rows are never touched. Returns the number of reservations released.
+    pub fn release_abandoned(
+        &self,
+        chain_id: u64,
+        address: &str,
+        keep: &[i64],
+    ) -> Result<u32, EvmError> {
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store_err)?;
+        let ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM evm_tx WHERE chain_id = ?1 AND address = ?2
+                       AND status = 'reserved' ORDER BY nonce DESC",
+                )
+                .map_err(store_err)?;
+            let rows = stmt
+                .query_map(params![to_i64(chain_id)?, address], |r| r.get::<_, i64>(0))
+                .map_err(store_err)?;
+            rows.collect::<Result<_, _>>().map_err(store_err)?
+        };
+        let mut released = 0u32;
+        for id in ids.into_iter().filter(|id| !keep.contains(id)) {
+            let nonce: i64 = tx
+                .query_row("SELECT nonce FROM evm_tx WHERE id = ?1", [id], |r| r.get(0))
+                .map_err(store_err)?;
+            let changed = tx
+                .execute(
+                    "UPDATE evm_tx SET status = 'failed', error = 'abandoned', updated_at = ?2
+                     WHERE id = ?1 AND status = 'reserved'",
+                    params![id, now()],
+                )
+                .map_err(store_err)?;
+            if changed == 1 {
+                tx.execute(
+                    "UPDATE evm_nonce SET next_nonce = ?3, updated_at = ?4
+                     WHERE chain_id = ?1 AND address = ?2 AND next_nonce = ?3 + 1",
+                    params![to_i64(chain_id)?, address, nonce, now()],
+                )
+                .map_err(store_err)?;
+                released += 1;
+            }
+        }
+        tx.commit().map_err(store_err)?;
+        Ok(released)
     }
 
     /// Fill gas and fee fields after the transaction was built.

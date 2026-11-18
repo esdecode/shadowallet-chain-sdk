@@ -18,7 +18,7 @@ mod fee;
 pub use fee::{FeeQuote, SelectedFees, quote_fees, select_fees};
 mod store;
 pub use store::{
-    EvmStore, ReservedTransaction, StoredTransaction, TokenRecord, TransactionDraft,
+    CancelOutcome, EvmStore, ReservedTransaction, StoredTransaction, TokenRecord, TransactionDraft,
     reconcile_receipt,
 };
 mod history;
