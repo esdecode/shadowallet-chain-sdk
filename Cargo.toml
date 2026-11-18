@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/rusqlite"]
+exclude = ["vendor/rusqlite", "vendor/libsqlite3-sys"]
 members = [
     "crates/chain-core",
     "crates/chain-utxo",
@@ -17,6 +17,7 @@ members = [
     "crates/chain-decred",
     "crates/chain-zano",
     "crates/chain-lightning",
+    "crates/chain-securedb",
     "vendor/monero-ed25519",
 ]
 
@@ -67,3 +68,5 @@ monero-ed25519 = { path = "vendor/monero-ed25519" }
 # RUSTSEC-2026-0459: zcash_client_sqlite pins rusqlite 0.37, whose libsqlite3-sys 0.35 bundles a vulnerable SQLite.
 # The vendored rusqlite 0.37.0 is unmodified except for its libsqlite3-sys requirement (0.39 = bundled SQLite 3.54.1).
 rusqlite = { path = "vendor/rusqlite" }
+# SQLCipher 4.20.0 (SQLite 3.54.1, SQLCipher LibTomCrypt provider) in place of plain SQLite for every `bundled` consumer; see vendor/libsqlite3-sys/SHADOWALLET-PATCH.md.
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }

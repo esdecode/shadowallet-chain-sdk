@@ -1,0 +1,25 @@
+[package]
+name = "shadowallet-chain-securedb"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+description = "Encrypted SQLite storage helpers: SQLCipher key handling, plaintext refusal, key derivation with domain separation, and a verified, crash-safe plaintext-to-encrypted migration."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["sqlcipher", "sqlite", "encryption", "wallet"]
+categories = ["cryptography", "database"]
+
+[dependencies]
+rusqlite.workspace = true
+hkdf = "0.12"
+sha2.workspace = true
+zeroize = "1"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
