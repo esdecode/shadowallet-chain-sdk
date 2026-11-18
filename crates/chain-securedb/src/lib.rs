@@ -399,6 +399,22 @@ fn key_for(path: &Path, salt: &[u8; 32]) -> Result<DbKey, SecureDbError> {
     resolver(&info_of(path, &prefix), salt).map_err(SecureDbError::NoKey)
 }
 
+static GATES: std::sync::Mutex<Vec<(String, std::sync::Arc<std::sync::Mutex<()>>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn path_gate(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let key = norm(&path.to_string_lossy());
+    let mut g = GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, m)) = g.iter().find(|(k, _)| *k == key) {
+        return m.clone();
+    }
+    let m = std::sync::Arc::new(std::sync::Mutex::new(()));
+    g.push((key, m.clone()));
+    m
+}
+
 /// Resolve `path` and, when a key applies, bring the file to the encrypted state first: an interrupted earlier
 /// migration is completed or rolled back, a plaintext file is converted (verified, plaintext retained).
 /// `Ok(None)` means plain (no resolver and encryption not required).
@@ -406,6 +422,13 @@ fn key_for(path: &Path, salt: &[u8; 32]) -> Result<DbKey, SecureDbError> {
 /// # Errors
 /// See [`SecureDbError`].
 pub fn prepare(path: &Path) -> Result<Option<DbKey>, SecureDbError> {
+    // One preparation per file at a time: a background migration of the whole vault and a chain screen opening the
+    // same database must not race on the temporary and retained files. The second caller waits, then finds the
+    // encrypted file and only checks it.
+    let gate = path_gate(path);
+    let _held = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match resolve(path)? {
         Resolved::Plain => Ok(None),
         Resolved::Key(_) => {
