@@ -389,9 +389,9 @@ pub fn resolve(path: &Path) -> Result<Resolved, SecureDbError> {
                 .map(Resolved::Key)
                 .map_err(SecureDbError::NoKey)
         }
-        None if REQUIRED.load(std::sync::atomic::Ordering::SeqCst) => Err(SecureDbError::NoKey(
-            format!("no key for {} (vault locked?)", path.display()),
-        )),
+        None if REQUIRED.load(std::sync::atomic::Ordering::SeqCst) || is_protected(&full) => Err(
+            SecureDbError::NoKey(format!("no key for {} (vault locked?)", path.display())),
+        ),
         None => Ok(Resolved::Plain),
     }
 }
