@@ -995,6 +995,14 @@ impl BitcoinEngine {
         self.apply_test_tx(tx, confirmed)
     }
 
+    /// Apply a signed transaction the wallet itself produced, the way a synchronisation would show it:
+    /// unconfirmed, or confirmed in a new block on top of the tip. Returns the txid.
+    pub fn ingest_for_test(&mut self, raw: &[u8], confirmed: bool) -> Result<String, BitcoinError> {
+        let tx: bdk_wallet::bitcoin::Transaction = bdk_wallet::bitcoin::consensus::deserialize(raw)
+            .map_err(|e| BitcoinError::Engine(e.to_string()))?;
+        Ok(self.apply_test_tx(tx, confirmed))
+    }
+
     /// Mine `n` empty blocks on top of the tip (raises confirmations).
     pub fn mine_for_test(&mut self, n: u32) {
         for _ in 0..n {
