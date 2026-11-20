@@ -90,7 +90,14 @@ fn selecting_one_utxo_spends_exactly_that_one() {
     let pick = out(&utxos[1]); // 50_000
     let plan = f
         .engine
-        .build_transfer_selected(&f.recipient, 30_000, 2, false, std::slice::from_ref(&pick), &[])
+        .build_transfer_selected(
+            &f.recipient,
+            30_000,
+            2,
+            false,
+            std::slice::from_ref(&pick),
+            &[],
+        )
         .unwrap();
     let s = f.engine.describe_psbt(&plan.psbt).unwrap();
     assert_eq!(s.inputs.len(), 1);
@@ -195,7 +202,14 @@ fn bad_selections_are_refused_before_anything_is_built() {
     // frozen or reserved by the caller
     let e = f
         .engine
-        .build_transfer_selected(&f.recipient, 1_000, 2, false, std::slice::from_ref(&a), std::slice::from_ref(&a))
+        .build_transfer_selected(
+            &f.recipient,
+            1_000,
+            2,
+            false,
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&a),
+        )
         .unwrap_err();
     assert!(e.to_string().contains("frozen or reserved"), "{e}");
     // a zero amount is not a payment

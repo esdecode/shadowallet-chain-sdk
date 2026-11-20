@@ -180,6 +180,36 @@ pub const BASE_SEPOLIA: EvmChain = EvmChain {
     fee_model: FeeModel::OpStack,
     confirmations: 1,
 };
+/// Avalanche C-Chain (EIP-1559 dynamic fees since the Apricot Phase 3 / Etna rules; chain id 43114).
+pub const AVALANCHE: EvmChain = EvmChain {
+    name: "avalanche",
+    chain_id: 43_114,
+    native_symbol: "AVAX",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::Eip1559,
+    confirmations: 1,
+};
+/// Avalanche Fuji C-Chain test network (chain id 43113).
+pub const AVALANCHE_FUJI: EvmChain = EvmChain {
+    name: "avalanche-fuji",
+    chain_id: 43_113,
+    native_symbol: "AVAX",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::Eip1559,
+    confirmations: 1,
+};
+/// OP Sepolia test network (chain id 11155420; OP stack, L1 data fee from the GasPriceOracle predeploy).
+pub const OPTIMISM_SEPOLIA: EvmChain = EvmChain {
+    name: "optimism-sepolia",
+    chain_id: 11_155_420,
+    native_symbol: "ETH",
+    native_decimals: 18,
+    eip1559: true,
+    fee_model: FeeModel::OpStack,
+    confirmations: 1,
+};
 pub const ANVIL: EvmChain = EvmChain {
     name: "anvil",
     chain_id: 31_337,
@@ -202,6 +232,9 @@ pub const PROFILES: &[EvmChain] = &[
     BSC_TESTNET,
     ARBITRUM_SEPOLIA,
     BASE_SEPOLIA,
+    AVALANCHE,
+    AVALANCHE_FUJI,
+    OPTIMISM_SEPOLIA,
     ANVIL,
 ];
 
@@ -1175,6 +1208,47 @@ mod tests {
         assert_eq!(ids.len(), PROFILES.len());
         assert_eq!(EvmChain::by_name("anvil").unwrap().chain_id, 31_337);
         assert!(EvmChain::by_id(999_999).is_none());
+    }
+
+    /// Chain ids and native currencies against the networks' own documentation (chainid.network / chainlist
+    /// registry entries and each project's docs), so a typo in a profile cannot send a signature to another chain.
+    #[test]
+    fn profiles_match_the_published_network_identities() {
+        let table: [(&str, u64, &str, bool); 15] = [
+            ("ethereum", 1, "ETH", false),
+            ("sepolia", 11_155_111, "ETH", true),
+            ("polygon", 137, "POL", false),
+            ("bsc", 56, "BNB", false),
+            ("arbitrum", 42_161, "ETH", false),
+            ("optimism", 10, "ETH", false),
+            ("base", 8_453, "ETH", false),
+            ("avalanche", 43_114, "AVAX", false),
+            ("polygon-amoy", 80_002, "POL", true),
+            ("bsc-testnet", 97, "tBNB", true),
+            ("arbitrum-sepolia", 421_614, "ETH", true),
+            ("base-sepolia", 84_532, "ETH", true),
+            ("optimism-sepolia", 11_155_420, "ETH", true),
+            ("avalanche-fuji", 43_113, "AVAX", true),
+            ("anvil", 31_337, "ETH", true),
+        ];
+        for (name, id, symbol, _test) in table {
+            let p = EvmChain::by_name(name).unwrap();
+            assert_eq!((p.chain_id, p.native_symbol), (id, symbol), "{name}");
+            assert_eq!(EvmChain::by_id(id).unwrap().name, name);
+        }
+        assert_eq!(PROFILES.len(), table.len());
+        // the two OP-stack mainnets and testnets pay an L1 data fee; Arbitrum folds it into the gas estimate
+        for n in ["optimism", "base", "optimism-sepolia", "base-sepolia"] {
+            assert_eq!(
+                EvmChain::by_name(n).unwrap().fee_model,
+                FeeModel::OpStack,
+                "{n}"
+            );
+        }
+        assert_eq!(
+            EvmChain::by_name("bsc").unwrap().fee_model,
+            FeeModel::Legacy
+        );
     }
 
     #[test]
