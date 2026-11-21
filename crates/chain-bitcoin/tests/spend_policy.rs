@@ -142,3 +142,33 @@ fn unconfirmed_incoming_is_excluded_from_automatic_selection_but_an_explicit_cho
     f.e.fund_for_test(2, &[200_000], true);
     assert!(f.e.build_transfer(&f.to, 50_000, 2, false).is_ok());
 }
+
+/// With the compile-time `mainnet-send` feature the engine may BUILD (never sign) a mainnet transaction; without it,
+/// building is refused. Both builds are covered by this test.
+#[test]
+fn mainnet_building_follows_the_compile_time_feature() {
+    let d = WatchDescriptors::from_extended_pubkey(
+        "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs",
+        BtcNetwork::Mainnet,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = BitcoinEngine::create(&dir.path().join("m.sqlite"), d).unwrap();
+    e.fund_for_test(1, &[200_000], true);
+    let r = e.build_transfer(
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        50_000,
+        2,
+        false,
+    );
+    if cfg!(feature = "mainnet-send") {
+        let plan = r.unwrap();
+        let psbt = bdk_wallet::bitcoin::psbt::Psbt::deserialize(&plan.psbt).unwrap();
+        assert!(
+            psbt.inputs.iter().all(|i| i.partial_sigs.is_empty()),
+            "building never signs"
+        );
+    } else {
+        assert!(matches!(r, Err(BitcoinError::MainnetDisabled)));
+    }
+}

@@ -516,7 +516,8 @@ impl BitcoinEngine {
                     .map_err(|e| BitcoinError::Engine(format!("bad excluded outpoint: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if self.descriptors.network.is_mainnet() {
+        // Compile-time opt-in (`mainnet-send`), never a runtime switch: the wallet's native policy decides separately.
+        if !cfg!(feature = "mainnet-send") && self.descriptors.network.is_mainnet() {
             return Err(BitcoinError::MainnetDisabled);
         }
         let address = self.validate_address(destination)?;
@@ -907,7 +908,8 @@ impl BitcoinEngine {
         selected: &[(String, u32)],
         blocked: &[(String, u32)],
     ) -> Result<TransferPlan, BitcoinError> {
-        if self.descriptors.network.is_mainnet() {
+        // Compile-time opt-in (`mainnet-send`), never a runtime switch: the wallet's native policy decides separately.
+        if !cfg!(feature = "mainnet-send") && self.descriptors.network.is_mainnet() {
             return Err(BitcoinError::MainnetDisabled);
         }
         if selected.is_empty() {

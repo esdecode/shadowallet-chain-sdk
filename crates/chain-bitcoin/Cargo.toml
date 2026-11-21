@@ -34,6 +34,9 @@ tokio.workspace = true
 [features]
 # Deterministic synthetic-transaction fixtures for offline tests; never enabled in a wallet build.
 test-support = []
+# Lifts the engine-level refusal to BUILD mainnet transactions (compile-time only; off by default). It grants nothing by
+# itself: a wallet must still authorize and sign, and the wallet's own native allow-list must still permit the network.
+mainnet-send = []
 
 [[test]]
 name = "coin_control"

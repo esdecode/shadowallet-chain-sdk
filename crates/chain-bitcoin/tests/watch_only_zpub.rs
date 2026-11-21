@@ -88,6 +88,7 @@ fn private_wrong_network_master_and_corrupt_keys_are_refused_without_echoing_the
     assert!(WatchDescriptors::from_extended_pubkey(vpub, BtcNetwork::Signet).is_ok());
 }
 
+#[cfg(not(feature = "mainnet-send"))]
 #[test]
 fn a_watch_only_engine_builds_unsigned_transactions_only_and_never_on_mainnet() {
     let dir = tempfile::tempdir().unwrap();
