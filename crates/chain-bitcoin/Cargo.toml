@@ -41,3 +41,7 @@ required-features = ["test-support"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "spend_policy"
+required-features = ["test-support"]

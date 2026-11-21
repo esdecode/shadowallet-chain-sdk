@@ -449,6 +449,8 @@ impl BitcoinEngine {
         let address = self.validate_address(destination)?;
         let fee_rate =
             FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(BitcoinError::Unsupported)?;
+        let mut unspendable = unspendable;
+        unspendable.extend(self.policy_blocked_outpoints());
         let mut builder = self.wallet.build_tx();
         builder.unspendable(unspendable);
         if send_max {
@@ -678,6 +680,12 @@ pub struct UtxoInfo {
     pub confirmation_time: Option<u64>,
     /// `tip - height + 1` when confirmed, `0` otherwise.
     pub confirmations: u64,
+    /// The funding transaction is a coinbase (first input spends the null outpoint).
+    pub is_coinbase: bool,
+    /// Whether automatic coin selection may use this output under the wallet's spending policy.
+    pub spendable: bool,
+    /// Why it is not spendable: `immature coinbase` or `unconfirmed incoming`.
+    pub unspendable_reason: Option<&'static str>,
 }
 
 /// One input of a PSBT with the value it spends (taken from the PSBT's own previous-output data).
@@ -714,7 +722,48 @@ fn parse_outpoint(txid: &str, vout: u32) -> Result<OutPoint, BitcoinError> {
     Ok(OutPoint::new(txid, vout))
 }
 
+/// Bitcoin consensus: a coinbase output may be spent by a block at height >= its own height + 100, i.e. it needs
+/// 100 confirmations (`tip - height + 1 >= 100`) before it can enter a transaction that the next block could include.
+pub const COINBASE_MATURITY: u64 = 100;
+
 impl BitcoinEngine {
+    /// True when the transaction that created `outpoint` is a coinbase transaction.
+    pub fn is_coinbase(&self, outpoint: &OutPoint) -> bool {
+        self.wallet
+            .get_tx(outpoint.txid)
+            .is_some_and(|t| t.tx_node.tx.is_coinbase())
+    }
+
+    /// Spending policy for AUTOMATIC selection (the wallet never trusts a provider flag for this):
+    /// an immature coinbase is never spendable, and an unconfirmed output is spendable only when it is the wallet's own
+    /// change (internal keychain); an unconfirmed payment from someone else can be replaced or dropped by its sender.
+    fn policy_block_reason(&self, u: &bdk_wallet::LocalOutput, tip: u32) -> Option<&'static str> {
+        use bdk_wallet::chain::ChainPosition;
+        let confirmations = match &u.chain_position {
+            ChainPosition::Confirmed { anchor, .. } => {
+                u64::from(tip.saturating_sub(anchor.block_id.height)).saturating_add(1)
+            }
+            ChainPosition::Unconfirmed { .. } => 0,
+        };
+        if self.is_coinbase(&u.outpoint) && confirmations < COINBASE_MATURITY {
+            return Some("immature coinbase");
+        }
+        if confirmations == 0 && u.keychain != KeychainKind::Internal {
+            return Some("unconfirmed incoming");
+        }
+        None
+    }
+
+    /// Outputs that automatic selection must not use under the spending policy.
+    fn policy_blocked_outpoints(&self) -> Vec<OutPoint> {
+        let tip = self.wallet.latest_checkpoint().height();
+        self.wallet
+            .list_unspent()
+            .filter(|u| self.policy_block_reason(u, tip).is_some())
+            .map(|u| u.outpoint)
+            .collect()
+    }
+
     /// Every unspent output the wallet knows, with the data Coin Control displays.
     pub fn list_utxos(&self) -> Vec<UtxoInfo> {
         use bdk_wallet::chain::ChainPosition;
@@ -744,6 +793,9 @@ impl BitcoinEngine {
                     confirmation_time: time,
                     confirmations: height
                         .map_or(0, |h| u64::from(tip.saturating_sub(h)).saturating_add(1)),
+                    is_coinbase: self.is_coinbase(&u.outpoint),
+                    spendable: self.policy_block_reason(&u, tip).is_none(),
+                    unspendable_reason: self.policy_block_reason(&u, tip),
                 }
             })
             .collect();
@@ -796,6 +848,15 @@ impl BitcoinEngine {
             if blocked.contains(outpoint) {
                 return Err(BitcoinError::Engine(format!(
                     "input {outpoint} is frozen or reserved by another transaction"
+                )));
+            }
+            // An explicit choice may use an unconfirmed output (CPFP does), but never an immature coinbase.
+            let tip = self.wallet.latest_checkpoint().height();
+            if let Some(u) = self.wallet.list_unspent().find(|u| u.outpoint == *outpoint)
+                && self.policy_block_reason(&u, tip) == Some("immature coinbase")
+            {
+                return Err(BitcoinError::Engine(format!(
+                    "input {outpoint} is an immature coinbase output (needs {COINBASE_MATURITY} confirmations)"
                 )));
             }
         }
