@@ -179,6 +179,9 @@ impl WatchDescriptors {
     }
 }
 
+/// Upper bound for one Esplora request (read or submit). A stalled provider can no longer hang the wallet.
+pub const HTTP_TIMEOUT_SECS: u64 = 30;
+
 pub struct BitcoinEngine {
     wallet: PersistedWallet<SqliteStore>,
     descriptors: WatchDescriptors,
@@ -210,6 +213,7 @@ impl BitcoinEngine {
         // retried a bounded number of times, each time with a fresh client and a fresh request.
         let update = retry_read(|| {
             let client = bdk_esplora::esplora_client::Builder::new(url)
+                .timeout(HTTP_TIMEOUT_SECS)
                 .build_async()
                 .map_err(|e| BitcoinError::Network(e.to_string()))?;
             let request = self.wallet.start_full_scan();
@@ -585,10 +589,24 @@ impl BitcoinEngine {
         raw_transaction: &[u8],
         url: &str,
     ) -> Result<String, BitcoinError> {
+        self.broadcast_esplora_with_timeout(raw_transaction, url, HTTP_TIMEOUT_SECS)
+    }
+
+    /// Submit a signed transaction through Esplora with a bounded wait. The returned id is ALWAYS the one computed from
+    /// the signed bytes: an id echoed by the provider is never used, so a provider cannot redirect tracking. An error
+    /// (including a timeout) means the outcome is UNKNOWN unless the provider answered with a definite rejection; the
+    /// caller must keep the inputs reserved and reconcile by this id. A submission is never retried here.
+    pub fn broadcast_esplora_with_timeout(
+        &self,
+        raw_transaction: &[u8],
+        url: &str,
+        timeout_secs: u64,
+    ) -> Result<String, BitcoinError> {
         let tx: bdk_wallet::bitcoin::Transaction =
             bdk_wallet::bitcoin::consensus::deserialize(raw_transaction)
                 .map_err(|e| BitcoinError::Engine(e.to_string()))?;
         let client = bdk_esplora::esplora_client::Builder::new(url)
+            .timeout(timeout_secs)
             .build_async()
             .map_err(|e| BitcoinError::Network(e.to_string()))?;
         block_on(client.broadcast(&tx)).map_err(|e| BitcoinError::Network(e.to_string()))?;
@@ -699,6 +717,7 @@ impl BitcoinEngine {
     pub fn estimate_fees_esplora(url: &str) -> Result<FeeEstimates, BitcoinError> {
         let estimates = retry_read(|| {
             let client = bdk_esplora::esplora_client::Builder::new(url)
+                .timeout(HTTP_TIMEOUT_SECS)
                 .build_async()
                 .map_err(|e| BitcoinError::Network(e.to_string()))?;
             block_on(client.get_fee_estimates()).map_err(|e| BitcoinError::Network(e.to_string()))
