@@ -45,3 +45,7 @@ workspace = true
 [[test]]
 name = "spend_policy"
 required-features = ["test-support"]
+
+[[test]]
+name = "watch_only_zpub"
+required-features = ["test-support"]

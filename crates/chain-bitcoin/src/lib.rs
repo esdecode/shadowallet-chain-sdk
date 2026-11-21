@@ -119,6 +119,66 @@ impl std::fmt::Debug for WatchDescriptors {
     }
 }
 
+impl WatchDescriptors {
+    /// Watch-only native SegWit (P2WPKH) account from an account-level SLIP-0132 extended PUBLIC key
+    /// (`zpub` on mainnet, `vpub` on the test networks), for example an Electrum native-SegWit wallet.
+    ///
+    /// The key is parsed locally and converted to the plain extended-public-key form BDK reads, without changing the
+    /// key or chain code. The receive branch is `/0/*` and the change branch `/1/*`, exactly as Electrum derives them.
+    /// No origin path is assumed: a valid key says nothing about whether it came from `m/84'/0'/0'`, and the addresses
+    /// depend only on the key itself. Refused, without echoing the input: a bad Base58Check checksum, a private key,
+    /// a version that is not the P2WPKH public version of `network`, a master key (depth 0), a wrong length.
+    /// An engine built from these descriptors holds no private key and has no signing method.
+    pub fn from_extended_pubkey(text: &str, network: BtcNetwork) -> Result<Self, BitcoinError> {
+        use bdk_wallet::bitcoin::{base58, bip32::Xpub};
+        const ZPUB: [u8; 4] = [0x04, 0xb2, 0x47, 0x46];
+        const VPUB: [u8; 4] = [0x04, 0x5f, 0x1c, 0xf6];
+        const PRIVATE: [[u8; 4]; 6] = [
+            [0x04, 0x88, 0xad, 0xe4], // xprv
+            [0x04, 0x9d, 0x78, 0x78], // yprv
+            [0x04, 0xb2, 0x43, 0x0c], // zprv
+            [0x04, 0x35, 0x83, 0x94], // tprv
+            [0x04, 0x4a, 0x4e, 0x28], // uprv
+            [0x04, 0x5f, 0x18, 0xbc], // vprv
+        ];
+        let fail = |why: &str| BitcoinError::Engine(format!("extended public key refused: {why}"));
+        let data = base58::decode_check(text.trim())
+            .map_err(|_| fail("not valid Base58Check (typo or wrong checksum)"))?;
+        if data.len() != 78 {
+            return Err(fail("wrong length"));
+        }
+        let version: [u8; 4] = [data[0], data[1], data[2], data[3]];
+        if PRIVATE.contains(&version) {
+            return Err(fail("this is a private key; only public keys are accepted"));
+        }
+        let expected = if network.is_mainnet() { ZPUB } else { VPUB };
+        if version != expected {
+            return Err(fail(
+                "version is not the native SegWit public version for this network (zpub on mainnet, vpub on test networks)",
+            ));
+        }
+        let mut plain = data;
+        let plain_version: [u8; 4] = if network.is_mainnet() {
+            [0x04, 0x88, 0xb2, 0x1e]
+        } else {
+            [0x04, 0x35, 0x87, 0xcf]
+        };
+        plain[..4].copy_from_slice(&plain_version);
+        let xpub = Xpub::decode(&plain).map_err(|_| fail("not a valid extended public key"))?;
+        if xpub.depth == 0 {
+            return Err(fail("a master (depth 0) key is not an account key"));
+        }
+        let fingerprint = xpub.fingerprint().to_string();
+        Ok(Self {
+            network,
+            kind: AddressKind::P2wpkh,
+            external: format!("wpkh({xpub}/0/*)"),
+            internal: format!("wpkh({xpub}/1/*)"),
+            fingerprint,
+        })
+    }
+}
+
 pub struct BitcoinEngine {
     wallet: PersistedWallet<SqliteStore>,
     descriptors: WatchDescriptors,
