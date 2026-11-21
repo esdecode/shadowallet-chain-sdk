@@ -28,10 +28,16 @@ tokio = { workspace = true, features = ["sync", "time"] }
 reqwest = { workspace = true, features = ["socks"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"
 bip39 = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 monero-wallet = "0.2.0"
+
+[features]
+# Compile-time opt-in that lifts the three engine-level refusals to prepare, sign and publish on Monero MAINNET (off by default).
+# It grants nothing by itself: the wallet native policy and one-shot authorization still decide.
+mainnet-send = []
 
 [lints]
 workspace = true
