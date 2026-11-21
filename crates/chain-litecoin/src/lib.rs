@@ -91,6 +91,8 @@ pub enum LitecoinSdkError {
     InsufficientFunds,
     #[error("zero amount")]
     ZeroAmount,
+    #[error("amount is below the Litecoin dust threshold")]
+    Dust,
     #[error("fee rejected by policy: {0}")]
     Fee(#[from] FeePolicyError),
     #[error("invalid transaction: {0}")]
@@ -214,7 +216,10 @@ fn outpoint(value: &Utxo) -> Result<OutPoint, LitecoinSdkError> {
 const P2WPKH_INPUT_VSIZE: u64 = 68;
 const P2WPKH_OUTPUT_VSIZE: u64 = 31;
 const TX_OVERHEAD_VSIZE: u64 = 11;
-const CHANGE_DUST_SATS: u64 = 546;
+/// Litecoin Core `DUST_RELAY_TX_FEE` is 30 000 sat/kvB (src/policy/policy.h), not Bitcoin's 3 000: a P2WPKH output
+/// (31 B output + 67 B discounted spend = 98 B) is dust below 98 * 30 000 / 1000 = 2 940 litoshi and is not relayed.
+/// An output under this amount (recipient or change) would make the transaction non-standard on mainnet.
+const CHANGE_DUST_SATS: u64 = 2_940;
 
 pub fn estimate_vsize(inputs: usize, outputs: usize) -> u64 {
     TX_OVERHEAD_VSIZE
@@ -235,6 +240,9 @@ pub fn prepare_transfer(
     let destination = account.validate_address(destination)?;
     if amount_sats == 0 {
         return Err(LitecoinSdkError::ZeroAmount);
+    }
+    if amount_sats < CHANGE_DUST_SATS {
+        return Err(LitecoinSdkError::Dust);
     }
     LITECOIN_FEE_POLICY.check(fee_rate_sat_vb, 0, Some(amount_sats))?;
     let mut sorted: Vec<&Utxo> = utxos.iter().collect();
@@ -514,6 +522,21 @@ mod tests {
             finalize_transfer(&a, &tampered, &signatures).unwrap_err(),
             LitecoinSdkError::InvalidSignature
         );
+    }
+
+    #[test]
+    fn dust_follows_litecoin_core_policy() {
+        let a = account();
+        let dest = a.address(0, 3).unwrap().to_string();
+        // 2 939 litoshi is dust for a P2WPKH output (DUST_RELAY_TX_FEE 30 000 sat/kvB); 2 940 is not.
+        assert_eq!(
+            prepare_transfer(&a, &[utxo(1_000_000, 0)], &dest, 2_939, 1, 0).unwrap_err(),
+            LitecoinSdkError::Dust
+        );
+        assert!(prepare_transfer(&a, &[utxo(1_000_000, 0)], &dest, 2_940, 1, 0).is_ok());
+        // a change that would be dust goes to the fee instead of creating a non-standard output
+        let unsigned = prepare_transfer(&a, &[utxo(100_000, 0)], &dest, 96_000, 3, 0).unwrap();
+        assert!(unsigned.change_sats == 0 || unsigned.change_sats >= 2_940);
     }
 
     #[test]

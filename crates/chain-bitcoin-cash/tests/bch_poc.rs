@@ -211,19 +211,43 @@ fn fee_policy_and_insufficient_funds_fail_closed() {
         index: 0,
     };
     assert_eq!(
-        build_unsigned(&account, &[utxo], &destination, 500, 100, 0).unwrap_err(),
+        build_unsigned(&account, &[utxo], &destination, 1_000, 100, 0).unwrap_err(),
         BchError::InsufficientFunds
     );
     assert!(matches!(
-        build_unsigned(&account, &[utxo], &destination, 500, 0, 0).unwrap_err(),
+        build_unsigned(&account, &[utxo], &destination, 1_000, 0, 0).unwrap_err(),
         BchError::Fee(_)
     ));
     assert!(matches!(
-        build_unsigned(&account, &[utxo], &destination, 500, 10_001, 0).unwrap_err(),
+        build_unsigned(&account, &[utxo], &destination, 1_000, 10_001, 0).unwrap_err(),
         BchError::Fee(_)
     ));
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn recipient_below_dust_is_refused() {
+    let account = account(BchNetwork::Regtest);
+    let destination = account.address(0, 1).unwrap().encode();
+    let utxo = Utxo {
+        outpoint: OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x45; 32]),
+            vout: 0,
+        },
+        value_sats: 100_000,
+        keychain: 0,
+        index: 0,
+    };
+    assert!(
+        matches!(build_unsigned(&account, &[utxo], &destination, 545, 1, 0).unwrap_err(),
+        BchError::Transaction(m) if m.contains("dust"))
+    );
+    // at the threshold the dust rule passes (the fee-ratio envelope may still refuse so small a payment)
+    assert!(
+        !matches!(build_unsigned(&account, &[utxo], &destination, 546, 1, 0),
+        Err(BchError::Transaction(m)) if m.contains("dust"))
+    );
 }

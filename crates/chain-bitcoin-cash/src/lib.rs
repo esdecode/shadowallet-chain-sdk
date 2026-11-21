@@ -556,6 +556,11 @@ pub fn build_unsigned<A: BchPublicAccount>(
     if amount_sats == 0 {
         return Err(BchError::Transaction("zero amount".to_owned()));
     }
+    if amount_sats < DUST_SATS {
+        return Err(BchError::Transaction(
+            "amount is below the Bitcoin Cash dust threshold (546)".to_owned(),
+        ));
+    }
     BCH_FEE_POLICY
         .check(fee_rate_sat_vb, 0, Some(amount_sats))
         .map_err(|e| BchError::Fee(e.to_string()))?;

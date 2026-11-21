@@ -65,9 +65,10 @@ impl DogeNetwork {
     }
 }
 
-/// Safety envelope in koinu. Not a verified Core relay/dust policy.
+/// Safety envelope in koinu. The floor is Dogecoin Core's `DEFAULT_MIN_RELAY_TX_FEE` (RECOMMENDED_MIN_TX_FEE / 10 =
+/// 0.001 DOGE/kB = 100 koinu/B, src/policy/policy.h): a lower rate is not relayed, so it is refused before signing.
 pub const DOGECOIN_FEE_POLICY: FeePolicy = FeePolicy {
-    min_sat_vb: 1,
+    min_sat_vb: 100,
     max_sat_vb: 10_000,
     max_fee_sats: 1_000_000_000,
     max_fee_percent: 10,
@@ -77,6 +78,8 @@ pub const DOGECOIN_FEE_POLICY: FeePolicy = FeePolicy {
 pub enum DogecoinSdkError {
     #[error("unknown network")]
     UnknownNetwork,
+    #[error("amount is below the Dogecoin dust limit")]
+    Dust,
     #[error("invalid xpub")]
     InvalidXpub,
     #[error("xpub belongs to a different network")]
@@ -201,6 +204,7 @@ fn outpoint(value: &Utxo) -> Result<OutPoint, DogecoinSdkError> {
 const P2PKH_INPUT_SIZE: u64 = 148;
 const P2PKH_OUTPUT_SIZE: u64 = 34;
 const TX_OVERHEAD_SIZE: u64 = 10;
+/// Dogecoin Core `DEFAULT_DUST_LIMIT` = RECOMMENDED_MIN_TX_FEE = 0.01 DOGE; applies to the recipient and to change.
 const CHANGE_DUST_SATS: u64 = 1_000_000;
 
 pub fn estimate_size(inputs: usize, outputs: usize) -> u64 {
@@ -220,6 +224,9 @@ pub fn prepare_transfer(
     let destination = account.validate_address(destination)?;
     if amount_sats == 0 {
         return Err(DogecoinSdkError::ZeroAmount);
+    }
+    if amount_sats < CHANGE_DUST_SATS {
+        return Err(DogecoinSdkError::Dust);
     }
     DOGECOIN_FEE_POLICY.check(fee_rate_sat_vb, 0, Some(amount_sats))?;
     let mut sorted: Vec<&Utxo> = utxos.iter().collect();
