@@ -26,6 +26,8 @@ fn the_bip84_zpub_derives_the_published_mainnet_addresses() {
         "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"
     );
     assert_eq!(e.network(), BtcNetwork::Mainnet);
+    // nothing scanned yet; two receive addresses were handed out (indexes 0 and 1), no change address
+    assert_eq!(e.revealed_indexes(), (Some(1), None));
     // surrounding whitespace (a copied file) is tolerated
     let d =
         WatchDescriptors::from_extended_pubkey(&format!(" {BIP84_ZPUB}\r\n"), BtcNetwork::Mainnet)

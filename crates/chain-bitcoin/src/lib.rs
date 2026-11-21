@@ -388,6 +388,15 @@ impl BitcoinEngine {
             .collect()
     }
 
+    /// Highest derivation index known for the receive and the change branch (after a scan: the highest index that has
+    /// history), `None` for a branch with no activity. Public key material only.
+    pub fn revealed_indexes(&self) -> (Option<u32>, Option<u32>) {
+        (
+            self.wallet.derivation_index(KeychainKind::External),
+            self.wallet.derivation_index(KeychainKind::Internal),
+        )
+    }
+
     pub fn list_unspent(&self) -> Vec<OutPoint> {
         self.wallet.list_unspent().map(|u| u.outpoint).collect()
     }
