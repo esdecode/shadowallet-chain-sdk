@@ -228,9 +228,70 @@ pub async fn publish_signed(
         counterparty: Some(to.to_owned()),
         created_ms: now_ms,
     })?;
-    node.daemon
-        .publish_transaction(tx)
-        .await
-        .map_err(|e| MoneroError::Node(format!("publish: {e:?}")))?;
-    Ok(txid)
+    match node.daemon.publish_transaction(tx).await {
+        Ok(()) => Ok(txid),
+        Err(monero_wallet::interface::PublishTransactionError::TransactionRejected(reason))
+            if definite_rejection(&reason) =>
+        {
+            // The node said, in so many words, that it will not take this transaction: it cannot confirm.
+            store.set_tx_status(&txid, "failed", None)?;
+            Err(MoneroError::Rejected(reason))
+        }
+        // Anything else (a timeout, a reset, an unreadable answer, "double spend" which may be OUR transaction already in the
+        // pool) is ambiguous: the row stays pending and the outputs stay reserved until the chain shows what happened.
+        Err(other) => Err(MoneroError::Node(format!("publish: {other:?}"))),
+    }
+}
+
+/// Reasons a Monero daemon gives when it refuses a transaction for good. "double spend" and "already in the pool" are
+/// deliberately NOT here: they can mean that this very transaction is already known.
+fn definite_rejection(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("double spend") || r.contains("already") || r.contains("known") {
+        return false;
+    }
+    [
+        "fee too low",
+        "invalid input",
+        "invalid output",
+        "low mixin",
+        "ring size",
+        "too big",
+        "overspend",
+        "too few outputs",
+        "invalid tx",
+        "invalid transaction",
+        "wrong version",
+        "unsupported",
+    ]
+    .iter()
+    .any(|k| r.contains(k))
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::definite_rejection;
+
+    #[test]
+    fn only_explicit_refusals_are_definite() {
+        for yes in [
+            "Fee too low",
+            "invalid input",
+            "Low mixin: ring size is too small",
+            "tx too big",
+            "Invalid transaction",
+        ] {
+            assert!(definite_rejection(yes), "{yes}");
+        }
+        for no in [
+            "double spend",
+            "Transaction already in the pool",
+            "known",
+            "",
+            "node busy",
+            "timeout",
+        ] {
+            assert!(!definite_rejection(no), "{no}");
+        }
+    }
 }

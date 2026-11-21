@@ -7,7 +7,9 @@
 
 use std::time::Instant;
 
-use monero_wallet::{Scanner, interface::ProvidesBlockchainMeta, interface::ProvidesScannableBlocks};
+use monero_wallet::{
+    Scanner, interface::ProvidesBlockchainMeta, interface::ProvidesScannableBlocks,
+};
 use shadowallet_chain_monero::*;
 
 const NODE: &str = "https://xmr-node.cakewallet.com:18081";
@@ -35,7 +37,12 @@ async fn where_the_time_goes() {
     let acct = account();
     let mut scanner = Scanner::new(acct.view_pair().clone());
     let start = tip - 300;
-    for (label, size) in [("1 block", 1usize), ("5 blocks", 5), ("20 blocks", 20), ("40 blocks", 40)] {
+    for (label, size) in [
+        ("1 block", 1usize),
+        ("5 blocks", 5),
+        ("20 blocks", 20),
+        ("40 blocks", 40),
+    ] {
         let from = start + (size * 7);
         let t = Instant::now();
         let blocks = node

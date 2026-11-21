@@ -22,7 +22,8 @@ pub use seed::{generate_seed_words, seed_to_words, words_to_seed};
 pub use send::{PreparedSend, RING_SIZE, prepare_send, publish_signed, sign_prepared};
 pub use store::{MoneroStore, OwnedOutput, TxRecord};
 pub use sync::{
-    Balance, Node, SyncReport, balance, connect, reconcile_pending, sync, sync_cancellable, tip,
+    Balance, Daemon, Node, SyncReport, balance, connect, reconcile_pending, sync, sync_cancellable,
+    tip,
 };
 pub use transport::ProxyTransport;
 
@@ -43,6 +44,9 @@ pub enum MoneroError {
     Scan(String),
     #[error("send error: {0}")]
     Send(String),
+    /// The node answered with a DEFINITE rejection of the transaction (not relayed, not in its pool): the inputs are free again.
+    #[error("the node rejected the transaction: {0}")]
+    Rejected(String),
     #[error("store error: {0}")]
     Store(String),
 }

@@ -21,8 +21,17 @@ impl ProxyTransport {
     /// `url` is the daemon's base URL (`http(s)://host:port`). `proxy`, when set, must be a `socks5h://` or
     /// `socks5://` URL; anything else is refused (an HTTP proxy would see the traffic).
     pub fn new(url: &str, proxy: Option<&str>) -> Result<Self, InterfaceError> {
+        Self::new_with_timeout(url, proxy, 60)
+    }
+
+    /// Like [`new`](Self::new) with an explicit per-request bound in seconds (tests use a short one).
+    pub fn new_with_timeout(
+        url: &str,
+        proxy: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<Self, InterfaceError> {
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(timeout_secs))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("Mozilla/5.0");
         if let Some(p) = proxy {
