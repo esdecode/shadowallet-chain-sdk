@@ -3923,6 +3923,7 @@ dependencies = [
  "rand_core 0.6.4",
  "reqwest",
  "rusqlite 0.41.1",
+ "serde_json",
  "sha3",
  "shadowallet-chain-securedb",
  "tempfile",

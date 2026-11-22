@@ -228,6 +228,20 @@ pub async fn publish_signed(
         counterparty: Some(to.to_owned()),
         created_ms: now_ms,
     })?;
+    // Link the spent outputs to this transaction (by the key images it carries) before anything is sent: from here on a
+    // restart cannot release them, whatever the node answers.
+    let key_images: Vec<[u8; 32]> = tx
+        .prefix()
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            monero_wallet::transaction::Input::ToKey { key_image, .. } => {
+                Some(key_image.to_bytes())
+            }
+            monero_wallet::transaction::Input::Gen(_) => None,
+        })
+        .collect();
+    store.lock_inputs_for_pending(&txid, &key_images)?;
     match node.daemon.publish_transaction(tx).await {
         Ok(()) => Ok(txid),
         Err(monero_wallet::interface::PublishTransactionError::TransactionRejected(reason))
@@ -235,6 +249,7 @@ pub async fn publish_signed(
         {
             // The node said, in so many words, that it will not take this transaction: it cannot confirm.
             store.set_tx_status(&txid, "failed", None)?;
+            store.release_failed(&txid)?;
             Err(MoneroError::Rejected(reason))
         }
         // Anything else (a timeout, a reset, an unreadable answer, "double spend" which may be OUR transaction already in the

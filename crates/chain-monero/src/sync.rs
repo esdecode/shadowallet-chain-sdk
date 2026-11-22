@@ -85,9 +85,22 @@ fn timelock_height(t: Timelock) -> u64 {
 }
 
 /// Confirm that what we stored for `scanned` is still on the node's chain; roll back if not.
-async fn check_reorg(store: &MoneroStore, node: &Node) -> Result<u32, MoneroError> {
+async fn check_reorg(store: &MoneroStore, node: &Node, tip: u64) -> Result<u32, MoneroError> {
     let mut scanned = store.scanned_height()?;
     let mut depth = 0u32;
+    // The chain can have become SHORTER than the checkpoint (a reorganisation to a shorter chain): every block above the
+    // node's tip is gone, and asking the node for it would only produce an error.
+    let tip_i = i64::try_from(tip).unwrap_or(i64::MAX);
+    if scanned > tip_i {
+        let gone = scanned - tip_i;
+        if gone > 150 {
+            return Err(MoneroError::Scan(
+                "reorganization deeper than 150 blocks: refusing to continue".to_owned(),
+            ));
+        }
+        depth = u32::try_from(gone).unwrap_or(u32::MAX);
+        scanned = tip_i;
+    }
     while scanned >= 0 {
         let Some(stored) = store.block_hash(scanned as u64)? else {
             break;
@@ -140,7 +153,7 @@ pub async fn sync_cancellable(
     }
     let tip = node.daemon.latest_block_number().await.map_err(node_err)? as u64;
     store.set_meta("tip", &tip.to_string())?;
-    let reorg_depth = check_reorg(store, node).await?;
+    let reorg_depth = check_reorg(store, node, tip).await?;
     let start = (store.scanned_height()? + 1).max(0) as u64;
     let mut report = SyncReport {
         from: start,

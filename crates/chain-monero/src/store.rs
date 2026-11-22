@@ -85,7 +85,68 @@ impl MoneroStore {
              CREATE TABLE IF NOT EXISTS xmr_block(height INTEGER PRIMARY KEY, hash BLOB NOT NULL);",
         )
         .map_err(db)?;
+        // Which signed (published or possibly published) transaction holds an output. A reservation WITHOUT this link belongs
+        // to a proposal that was only prepared: it dies with the process and is released at the next open. A reservation
+        // WITH it is kept until the chain shows the outcome (a node timeout is not proof that the transaction is gone).
+        let has_pending_tx = {
+            let mut stmt = conn.prepare("PRAGMA table_info(xmr_output)").map_err(db)?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(db)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db)?;
+            names.iter().any(|n| n == "pending_tx")
+        };
+        if !has_pending_tx {
+            conn.execute("ALTER TABLE xmr_output ADD COLUMN pending_tx BLOB", [])
+                .map_err(db)?;
+            // Before this column existed every reservation might have been a published transaction: keep them all.
+            conn.execute(
+                "UPDATE xmr_output SET pending_tx=zeroblob(32) WHERE reserved=1 AND pending_tx IS NULL",
+                [],
+            )
+            .map_err(db)?;
+        }
         Ok(Self { conn })
+    }
+
+    /// Link the inputs of a signed transaction (by key image) to it and reserve them. Called BEFORE publishing.
+    pub fn lock_inputs_for_pending(
+        &self,
+        txid: &[u8; 32],
+        key_images: &[[u8; 32]],
+    ) -> Result<(), MoneroError> {
+        for ki in key_images {
+            self.conn
+                .execute(
+                    "UPDATE xmr_output SET reserved=1, pending_tx=?1 WHERE key_image=?2 AND spent_in IS NULL",
+                    params![txid.as_slice(), ki.as_slice()],
+                )
+                .map_err(db)?;
+        }
+        Ok(())
+    }
+
+    /// The node definitely refused this transaction: free exactly its inputs.
+    pub fn release_failed(&self, txid: &[u8; 32]) -> Result<(), MoneroError> {
+        self.conn
+            .execute(
+                "UPDATE xmr_output SET reserved=0, pending_tx=NULL WHERE pending_tx=?1 AND spent_in IS NULL",
+                [txid.as_slice()],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// Release reservations of proposals that were prepared but never signed and published (a restart ends them).
+    /// Reservations held by a signed transaction are never touched here.
+    pub fn release_unpublished_reservations(&self) -> Result<usize, MoneroError> {
+        self.conn
+            .execute(
+                "UPDATE xmr_output SET reserved=0 WHERE reserved=1 AND pending_tx IS NULL",
+                [],
+            )
+            .map_err(db)
     }
 
     /// One store file belongs to one (network, primary address, account).
@@ -304,7 +365,7 @@ impl MoneroStore {
         let n = self
             .conn
             .execute(
-                "UPDATE xmr_output SET spent_in=?2, reserved=0 WHERE key_image=?1 AND spent_in IS NULL",
+                "UPDATE xmr_output SET spent_in=?2, reserved=0, pending_tx=NULL WHERE key_image=?1 AND spent_in IS NULL",
                 params![key_image.as_slice(), txid.as_slice()],
             )
             .map_err(db)?;
@@ -388,7 +449,7 @@ impl MoneroStore {
         // spends confirmed above the fork are undone: outputs become unspent again (the tx may be re-mined)
         self.conn
             .execute(
-                "UPDATE xmr_output SET spent_in=NULL, reserved=1 WHERE spent_in IN (SELECT txid FROM xmr_tx WHERE height > ?1)",
+                "UPDATE xmr_output SET pending_tx=spent_in, spent_in=NULL, reserved=1 WHERE spent_in IN (SELECT txid FROM xmr_tx WHERE height > ?1)",
                 [h],
             )
             .map_err(db)?;
@@ -553,5 +614,54 @@ mod tests {
         drop(s);
         let s = MoneroStore::open(&dir.path().join("x.db")).unwrap();
         assert_eq!(s.outputs().unwrap().len(), 1, "state survives a restart");
+    }
+
+    #[test]
+    fn reservations_of_signed_transactions_survive_a_restart_and_prepared_only_ones_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let s = MoneroStore::open(&path).unwrap();
+        s.register_account("monero-stagenet", "primary", 0).unwrap();
+        let mk = |i: u8, height: u64| OwnedOutput {
+            id: 0,
+            txid: [i; 32],
+            index_in_tx: 0,
+            amount: 10,
+            height,
+            key_image: [100 + i; 32],
+            subaddress: None,
+            timelock_height: 0,
+            blob: vec![1],
+            spent_in: None,
+            reserved: false,
+        };
+        for i in 1..=3u8 {
+            assert!(s.add_output(&mk(i, 100)).unwrap());
+        }
+        let ids: Vec<i64> = s.outputs().unwrap().iter().map(|o| o.id).collect();
+        // output 1: only prepared; output 2: signed and handed to the network; output 3: untouched
+        s.reserve(&ids[..2], true).unwrap();
+        s.lock_inputs_for_pending(&[7; 32], &[[102; 32]]).unwrap();
+        drop(s);
+        let s = MoneroStore::open(&path).unwrap();
+        assert_eq!(s.release_unpublished_reservations().unwrap(), 1);
+        let outs = s.outputs().unwrap();
+        assert!(!outs[0].reserved, "a prepared-only proposal is released");
+        assert!(outs[1].reserved, "a signed transaction keeps its inputs");
+        assert!(!outs[2].reserved);
+        // a definite rejection frees exactly that transaction's inputs
+        s.release_failed(&[8; 32]).unwrap();
+        assert!(
+            s.outputs().unwrap()[1].reserved,
+            "another transaction id frees nothing"
+        );
+        s.release_failed(&[7; 32]).unwrap();
+        assert!(!s.outputs().unwrap()[1].reserved);
+        // a spend seen on chain clears the link
+        s.lock_inputs_for_pending(&[9; 32], &[[103; 32]]).unwrap();
+        assert!(s.mark_spent(&[103; 32], &[9; 32]).unwrap());
+        assert_eq!(s.release_unpublished_reservations().unwrap(), 0);
+        let last = &s.outputs().unwrap()[2];
+        assert!(!last.reserved && last.spent_in == Some([9; 32]));
     }
 }
