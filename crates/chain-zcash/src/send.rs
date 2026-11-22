@@ -46,7 +46,7 @@ pub fn prepare_send(
     amount: u64,
     memo: Option<&str>,
 ) -> Result<PreparedSend, ZcashError> {
-    if w.net != crate::TESTNET {
+    if !w.net.signing_enabled() {
         return Err(ZcashError::Send("mainnet signing is disabled".to_owned()));
     }
     let params = w.net.params();
@@ -129,7 +129,7 @@ pub async fn sign_and_broadcast(
     account_index: u32,
     prepared: PreparedSend,
 ) -> Result<Vec<String>, ZcashError> {
-    if w.net != crate::TESTNET {
+    if !w.net.signing_enabled() {
         return Err(ZcashError::Send("mainnet signing is disabled".to_owned()));
     }
     let params = w.net.params();

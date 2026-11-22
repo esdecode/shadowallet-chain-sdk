@@ -1,6 +1,6 @@
 use zcash_protocol::consensus::Network;
 
-/// A Zcash network. Mainnet is read-only: the Rust authorization boundary never signs for it.
+/// A Zcash network. Mainnet is read-only unless the crate is built with `mainnet-send` (the wallet's internal-testing build).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZcashNet {
     pub name: &'static str,
@@ -30,7 +30,7 @@ pub const TESTNET: ZcashNet = ZcashNet {
 
 impl ZcashNet {
     pub fn signing_enabled(self) -> bool {
-        self == TESTNET
+        self == TESTNET || (cfg!(feature = "mainnet-send") && self == MAINNET)
     }
 
     pub fn validate(self) -> Result<(), crate::ZcashError> {
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn modified_profiles_and_mainnet_cannot_sign() {
         assert!(TESTNET.signing_enabled());
-        assert!(!MAINNET.signing_enabled());
+        assert_eq!(MAINNET.signing_enabled(), cfg!(feature = "mainnet-send"));
         let mut forged = MAINNET;
         forged.is_mainnet = false;
         assert!(!forged.signing_enabled());

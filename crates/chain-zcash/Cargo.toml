@@ -39,5 +39,9 @@ rusqlite = { version = "=0.37.0", features = ["bundled"] }
 bip39 = "2"
 tempfile = "3"
 
+[features]
+# Compile-time opt-in that lets MAINNET sign. Off by default; the wallet enables it only in its internal-testing build.
+mainnet-send = []
+
 [lints]
 workspace = true

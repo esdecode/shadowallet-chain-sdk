@@ -50,10 +50,11 @@ impl SolanaNetwork {
     }
 
     /// Signing policy: the disposable local validator and the public Devnet (worthless test SOL)
-    /// may sign. Testnet and mainnet-beta never do. The cluster identity is verified by genesis
+    /// may sign. Testnet never does; mainnet-beta only in a build compiled with `mainnet-send`. The cluster identity is verified by genesis
     /// hash before any transaction is prepared (see `SolanaRpc::verify_network`).
     pub fn signing_enabled(self) -> bool {
         matches!(self, Self::Localnet | Self::Devnet)
+            || (cfg!(feature = "mainnet-send") && self == Self::MainnetBeta)
     }
 }
 
@@ -67,11 +68,15 @@ mod policy_tests {
             .iter()
             .filter(|n| n.signing_enabled())
             .collect();
+        let mut expected = vec![&SolanaNetwork::Localnet, &SolanaNetwork::Devnet];
+        if cfg!(feature = "mainnet-send") {
+            expected.push(&SolanaNetwork::MainnetBeta);
+        }
+        assert_eq!(signing, expected);
         assert_eq!(
-            signing,
-            vec![&SolanaNetwork::Localnet, &SolanaNetwork::Devnet]
+            SolanaNetwork::MainnetBeta.signing_enabled(),
+            cfg!(feature = "mainnet-send")
         );
-        assert!(!SolanaNetwork::MainnetBeta.signing_enabled());
         assert!(!SolanaNetwork::Testnet.signing_enabled());
     }
 }
