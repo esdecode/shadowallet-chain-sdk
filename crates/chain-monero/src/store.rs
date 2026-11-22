@@ -138,6 +138,29 @@ impl MoneroStore {
         Ok(())
     }
 
+    /// Key images of the unspent outputs that a signed transaction holds.
+    pub fn pending_inputs(&self, txid: &[u8; 32]) -> Result<Vec<[u8; 32]>, MoneroError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key_image FROM xmr_output WHERE pending_tx=?1 AND spent_in IS NULL")
+            .map_err(db)?;
+        let rows = stmt
+            .query_map([txid.as_slice()], |r| h32(r.get(0)?))
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    /// The transaction can no longer confirm: mark it `expired` and free exactly its inputs.
+    pub fn expire_pending(&self, txid: &[u8; 32]) -> Result<(), MoneroError> {
+        self.conn
+            .execute(
+                "UPDATE xmr_tx SET status='expired' WHERE txid=?1 AND status='pending'",
+                [txid.as_slice()],
+            )
+            .map_err(db)?;
+        self.release_failed(txid)
+    }
+
     /// Release reservations of proposals that were prepared but never signed and published (a restart ends them).
     /// Reservations held by a signed transaction are never touched here.
     pub fn release_unpublished_reservations(&self) -> Result<usize, MoneroError> {

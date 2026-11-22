@@ -161,14 +161,15 @@ impl Monerod {
         .unwrap_or_default()
     }
 
-    /// Submit raw bytes to the daemon's own consensus validation, without going through the wallet.
+    /// Submit raw bytes to the daemon's own consensus validation, without going through the wallet. A malformed body may make
+    /// the daemon close the connection without an answer: that is reported as status `"no answer"` (never as `"OK"`).
     pub async fn send_raw(&self, raw: &[u8]) -> serde_json::Value {
         self.post(
             "send_raw_transaction",
             serde_json::json!({"tx_as_hex": hex::encode(raw), "do_not_relay": true}).to_string(),
         )
         .await
-        .expect("send_raw_transaction")
+        .unwrap_or_else(|| serde_json::json!({"status": "no answer"}))
     }
 }
 

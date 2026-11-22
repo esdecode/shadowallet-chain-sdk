@@ -348,15 +348,107 @@ pub fn balance(store: &MoneroStore) -> Result<Balance, MoneroError> {
     Ok(b)
 }
 
-/// Retained for compatibility: an absent transaction or a node error is NOT proof
-/// that a signed transaction cannot still confirm. Pending inputs stay reserved
-/// until their key images are observed on chain. Never release all wallet outputs
-/// because one untrusted node failed to return a transaction.
+/// A daemon drops a transaction from its pool after three days. A signed transaction that the node has neither in its pool
+/// nor in a block, whose inputs are still unspent on that node, can only be revived by someone who still holds its bytes;
+/// after this long that is no longer a realistic risk and the coins would otherwise stay reserved for ever.
+pub const PENDING_EXPIRY_MS: u64 = 4 * 24 * 60 * 60 * 1000;
+
+/// Settle outgoing transactions that stayed `pending` for at least `max_age_ms`. A node error, an unreadable answer or a
+/// transaction the node still knows is NEVER proof that a transaction is gone: such rows are left alone (their inputs stay
+/// reserved). A row is expired, and exactly its inputs freed, only when the node reports the transaction as unknown AND
+/// either every input is unspent on that node, or an input was spent on chain by another transaction (it can never confirm).
+/// Returns how many transactions were expired.
 pub async fn reconcile_pending(
-    _store: &MoneroStore,
-    _node: &Node,
-    _now_ms: u64,
-    _max_age_ms: u64,
+    store: &MoneroStore,
+    node: &Node,
+    now_ms: u64,
+    max_age_ms: u64,
 ) -> Result<u32, MoneroError> {
-    Ok(0)
+    let mut expired = 0u32;
+    for row in store.history(200)? {
+        if row.direction != "out"
+            || row.status != "pending"
+            || row.created_ms == 0
+            || now_ms.saturating_sub(row.created_ms) < max_age_ms
+        {
+            continue;
+        }
+        // 1. the node must say, in so many words, that it does not know the transaction
+        if transaction_known(node, &row.txid).await != Some(false) {
+            continue;
+        }
+        // 2. what became of its inputs
+        let inputs = store.pending_inputs(&row.txid)?;
+        if !inputs.is_empty() {
+            let Some(status) = key_image_status(node, &inputs).await else {
+                continue;
+            };
+            // 0 unspent, 1 spent in a block, 2 spent in the pool: only "all unspent" frees the coins
+            if status.iter().any(|s| *s != 0) {
+                continue;
+            }
+        }
+        // inputs already spent by ANOTHER transaction (the scan cleared the link) or all unspent: it cannot confirm
+        store.expire_pending(&row.txid)?;
+        expired += 1;
+    }
+    Ok(expired)
+}
+
+/// Whether the node has the transaction (in its pool or in a block): `Some(false)` only when it lists the hash as missed and
+/// returns no copy of it; `None` for anything unclear.
+async fn transaction_known(node: &Node, txid: &[u8; 32]) -> Option<bool> {
+    let request = serde_json::json!({ "txs_hashes": [hex::encode(txid)] });
+    let answer = node
+        .daemon
+        .rpc_call("get_transactions", Some(request.to_string()), 1 << 20)
+        .await
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_str(&answer).ok()?;
+    if value.get("status")?.as_str()? != "OK" {
+        return None;
+    }
+    let missed = value
+        .get("missed_tx")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .any(|h| h.as_str() == Some(hex::encode(txid).as_str()))
+        })
+        .unwrap_or(false);
+    let copies = value
+        .get("txs")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    match (missed, copies) {
+        (true, 0) => Some(false),
+        (false, n) if n > 0 => Some(true),
+        _ => None,
+    }
+}
+
+/// `is_key_image_spent` for the given key images; `None` when the node's answer is not a clean, complete one.
+async fn key_image_status(node: &Node, key_images: &[[u8; 32]]) -> Option<Vec<u64>> {
+    let request =
+        serde_json::json!({ "key_images": key_images.iter().map(hex::encode).collect::<Vec<_>>() });
+    let answer = node
+        .daemon
+        .rpc_call(
+            "is_key_image_spent",
+            Some(request.to_string()),
+            key_images.len().saturating_mul(16).max(1024),
+        )
+        .await
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_str(&answer).ok()?;
+    if value.get("status")?.as_str()? != "OK" {
+        return None;
+    }
+    let statuses: Vec<u64> = value
+        .get("spent_status")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_u64)
+        .collect::<Option<_>>()?;
+    (statuses.len() == key_images.len()).then_some(statuses)
 }

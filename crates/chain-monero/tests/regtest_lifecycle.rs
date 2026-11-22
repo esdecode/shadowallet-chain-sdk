@@ -260,6 +260,10 @@ async fn the_daemon_refuses_every_tampered_transaction_and_accepts_the_genuine_o
             "a modified transaction was accepted at byte {at}: {answer}"
         );
     }
+    assert!(
+        d.get_height().await.is_some(),
+        "the daemon survived every malformed submission"
+    );
     assert_eq!(d.pool_size().await, 0, "nothing tampered reached the pool");
     // the genuine bytes go through the production publish path
     let txid = publish_signed(&store, &node, &tx, &to, 2 * XMR, fee, 1)
@@ -546,4 +550,124 @@ async fn a_chain_reorganisation_after_confirmation_returns_the_spend_to_pending_
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn an_old_pending_transaction_is_expired_only_when_the_node_knows_neither_it_nor_a_spend_of_its_inputs()
+ {
+    let Some((d, dir)) = chain_with_funds().await else {
+        eprintln!("SKIPPED: SHADOWALLET_MONEROD is not set");
+        return;
+    };
+    let acct = sender();
+    let direct = connect(MAINNET, &d.url, None).await.unwrap();
+    let fault = proxy::FaultProxy::start(&d.url);
+    let blocked = connect(MAINNET, &fault.url, None).await.unwrap();
+    let store = open_store(dir.path(), "s.db", &acct);
+    sync(&store, &acct, &direct, 1000).await.unwrap();
+    let t0 = 1_000_000u64;
+    let old = t0 + PENDING_EXPIRY_MS + 1;
+
+    // (a) a transaction the daemon never saw
+    fault
+        .block_send
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (tx_a, to, fee_a, ids_a) = built(&store, &blocked, 2 * XMR).await;
+    assert!(
+        publish_signed(&store, &blocked, &tx_a, &to, 2 * XMR, fee_a, t0)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reconcile_pending(&store, &direct, t0 + 3_600_000, PENDING_EXPIRY_MS)
+            .await
+            .unwrap(),
+        0,
+        "too young to judge"
+    );
+    assert_eq!(reserved_ids(&store), sorted(ids_a.clone()));
+    assert_eq!(
+        reconcile_pending(&store, &direct, old, PENDING_EXPIRY_MS)
+            .await
+            .unwrap(),
+        1,
+        "unknown to the node, inputs unspent, old enough"
+    );
+    assert_eq!(pending_row(&store, tx_a.hash()).0, "expired");
+    assert!(
+        reserved_ids(&store).is_empty(),
+        "exactly its inputs were freed"
+    );
+
+    // (b) a transaction the daemon holds is never judged gone, however old
+    let (tx_b, to, fee_b, _) = built(&store, &direct, 2 * XMR).await;
+    publish_signed(&store, &direct, &tx_b, &to, 2 * XMR, fee_b, t0)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconcile_pending(&store, &direct, old, PENDING_EXPIRY_MS)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(pending_row(&store, tx_b.hash()).0, "pending");
+    assert!(!reserved_ids(&store).is_empty());
+    d.generate(&acct.primary_address().to_string(), 1).await;
+    sync(&store, &acct, &direct, 1000).await.unwrap();
+    assert_eq!(pending_row(&store, tx_b.hash()).0, "confirmed");
+
+    // (c) a transaction whose inputs were spent on chain by a DIFFERENT transaction can never confirm
+    let outs = store.outputs().unwrap();
+    let pick = outs
+        .iter()
+        .find(|o| o.spent_in.is_none() && !o.reserved && o.height < 100)
+        .unwrap()
+        .id;
+    let acct2 = sender();
+    let p_c = prepare_send(
+        &store,
+        &acct2,
+        &blocked,
+        &to,
+        XMR,
+        FeePriority::Unimportant,
+        Some(&[pick]),
+    )
+    .await
+    .unwrap();
+    let fee_c = p_c.fee;
+    let tx_c = sign_prepared(&acct2, &blocked, p_c).unwrap();
+    assert!(
+        publish_signed(&store, &blocked, &tx_c, &to, XMR, fee_c, t0)
+            .await
+            .is_err()
+    );
+    store.reserve(&[pick], false).unwrap(); // the user abandons it locally...
+    let p_d = prepare_send(
+        &store,
+        &acct2,
+        &direct,
+        &to,
+        XMR,
+        FeePriority::Unimportant,
+        Some(&[pick]),
+    )
+    .await
+    .unwrap();
+    let fee_d = p_d.fee;
+    let tx_d = sign_prepared(&acct2, &direct, p_d).unwrap();
+    publish_signed(&store, &direct, &tx_d, &to, XMR, fee_d, t0)
+        .await
+        .unwrap(); // ...and the same coin is spent by another transaction
+    d.generate(&acct.primary_address().to_string(), 1).await;
+    sync(&store, &acct, &direct, 1000).await.unwrap();
+    assert_eq!(pending_row(&store, tx_d.hash()).0, "confirmed");
+    assert_eq!(pending_row(&store, tx_c.hash()).0, "pending");
+    assert_eq!(
+        reconcile_pending(&store, &direct, old, PENDING_EXPIRY_MS)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(pending_row(&store, tx_c.hash()).0, "expired");
 }

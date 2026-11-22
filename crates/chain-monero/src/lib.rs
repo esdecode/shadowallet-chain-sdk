@@ -22,8 +22,8 @@ pub use seed::{generate_seed_words, seed_to_words, words_to_seed};
 pub use send::{PreparedSend, RING_SIZE, prepare_send, publish_signed, sign_prepared};
 pub use store::{MoneroStore, OwnedOutput, TxRecord};
 pub use sync::{
-    Balance, Daemon, Node, SyncReport, balance, connect, reconcile_pending, sync, sync_cancellable,
-    tip,
+    Balance, Daemon, Node, PENDING_EXPIRY_MS, SyncReport, balance, connect, reconcile_pending,
+    sync, sync_cancellable, tip,
 };
 pub use transport::ProxyTransport;
 
