@@ -619,7 +619,7 @@ fn rpc_quota_is_respected_without_blocking_cross_checks() {
 }
 
 #[test]
-fn mainnet_cannot_use_the_public_indexer_backend() {
+fn mainnet_refuses_a_testnet_indexer_configuration() {
     let (_acct, xpub, fp) = account();
     let dir = tempfile::tempdir().unwrap();
     let main = Xpriv::new_master(DogeNetwork::Mainnet.kind(), &[7; 32]).unwrap();
@@ -635,7 +635,7 @@ fn mainnet_cannot_use_the_public_indexer_backend() {
         IndexerConfig::public_testnet(),
         &dir.path().join("x.sqlite"),
     );
-    assert!(r.unwrap_err().to_string().contains("testnet only"));
+    assert!(r.unwrap_err().to_string().contains("does not match"));
     let _ = xpub;
 }
 

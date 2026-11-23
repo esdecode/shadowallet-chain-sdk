@@ -1,4 +1,4 @@
-//! Dogecoin **testnet** backend built from two public, untrusted services instead of a full node.
+//! Dogecoin public indexer backend built from two independent, untrusted services.
 //!
 //! * SoChain v3 (`DOGETEST`): address UTXOs (with the raw transaction), address history, transaction status.
 //! * A Dogecoin Core JSON-RPC gateway (Tatum): genesis identity, block-hash cross-checks, `gettxout` cross-checks
@@ -27,10 +27,11 @@ use shadowallet_chain_utxo::UtxoHistoryEntry;
 
 use crate::DogecoinSdkError;
 
-/// Dogecoin testnet genesis block hash (identity of the network; the API name is never trusted).
+/// Dogecoin genesis block hashes (identity of the selected network; API names are never trusted).
 pub const TESTNET_GENESIS: &str =
     "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e";
-const SOCHAIN_NETWORK: &str = "DOGETEST";
+pub const MAINNET_GENESIS: &str =
+    "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691";
 /// How deep below the tip the two services are made to agree on a block hash.
 const CROSS_CHECK_DEPTH: u64 = 12;
 /// Spendable UTXOs that are cross-checked per sync (the rest are ignored, never trusted).
@@ -53,6 +54,12 @@ pub struct IndexerConfig {
     pub sochain_base: String,
     /// JSON-RPC endpoint of a Dogecoin Core node, e.g. `https://dogecoin-testnet.gateway.tatum.io`
     pub rpc_url: String,
+    /// SoChain network selector (`DOGE` or `DOGETEST`).
+    pub sochain_network: String,
+    /// Genesis hash required from both providers.
+    pub expected_genesis: String,
+    /// Human-readable network name used only in errors.
+    pub network_name: String,
     pub request_timeout: Duration,
     /// Request ceiling per engine instance for each service (protects the free tiers).
     pub max_requests: u32,
@@ -66,7 +73,24 @@ impl IndexerConfig {
     pub fn public_testnet() -> Self {
         Self {
             sochain_base: "https://sochain.com/api/v3".to_owned(),
-            rpc_url: "https://dogecoin-testnet.gateway.tatum.io".to_owned(),
+            rpc_url: "https://public-doge-testnet.rpcnode.dev".to_owned(),
+            sochain_network: "DOGETEST".to_owned(),
+            expected_genesis: TESTNET_GENESIS.to_owned(),
+            network_name: "Dogecoin testnet".to_owned(),
+            request_timeout: Duration::from_secs(20),
+            max_requests: 400,
+            rpc_per_minute: 5,
+            read_retries: 2,
+        }
+    }
+
+    pub fn public_mainnet() -> Self {
+        Self {
+            sochain_base: "https://sochain.com/api/v3".to_owned(),
+            rpc_url: "https://public-doge-mainnet.rpcnode.dev".to_owned(),
+            sochain_network: "DOGE".to_owned(),
+            expected_genesis: MAINNET_GENESIS.to_owned(),
+            network_name: "Dogecoin mainnet".to_owned(),
             request_timeout: Duration::from_secs(20),
             max_requests: 400,
             rpc_per_minute: 5,
@@ -168,7 +192,7 @@ impl Indexer {
             .timeout(cfg.request_timeout)
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("shadowallet-testnet-wallet")
+            .user_agent("shadowallet-dogecoin-wallet")
             .build()
             .map_err(|e| err("config", e))?;
         Ok(Self {
@@ -375,28 +399,28 @@ impl Indexer {
     }
 
     // ----------------------------------------------------------------- identity
-    /// Both services must be the Dogecoin testnet (genesis) and agree on a recent block. Memoised.
+    /// Both services must be the configured Dogecoin network and agree on a recent block. Memoised.
     pub fn ensure_identity(&self) -> Result<(), DogecoinSdkError> {
         if self.lock().identity_ok {
             return Ok(());
         }
-        let genesis = self.sochain_get(&format!("block/{SOCHAIN_NETWORK}/0"))?;
-        if genesis.get("hash").and_then(Value::as_str) != Some(TESTNET_GENESIS) {
+        let genesis = self.sochain_get(&format!("block/{}/0", self.cfg.sochain_network))?;
+        if genesis.get("hash").and_then(Value::as_str) != Some(self.cfg.expected_genesis.as_str()) {
             return Err(err(
                 "identity mismatch",
-                "the indexer's block 0 is not the Dogecoin testnet genesis",
+                format!("the indexer's block 0 is not {}", self.cfg.network_name),
             ));
         }
         let node_genesis = self.rpc("getblockhash", json!([0]), true, true)?;
-        if node_genesis.as_str() != Some(TESTNET_GENESIS) {
+        if node_genesis.as_str() != Some(self.cfg.expected_genesis.as_str()) {
             return Err(err(
                 "identity mismatch",
-                "the RPC node's block 0 is not the Dogecoin testnet genesis",
+                format!("the RPC node's block 0 is not {}", self.cfg.network_name),
             ));
         }
         let (tip, _) = self.tip()?;
         let probe = tip.saturating_sub(CROSS_CHECK_DEPTH);
-        let theirs = self.sochain_get(&format!("block/{SOCHAIN_NETWORK}/{probe}"))?;
+        let theirs = self.sochain_get(&format!("block/{}/{probe}", self.cfg.sochain_network))?;
         let theirs = theirs
             .get("hash")
             .and_then(Value::as_str)
@@ -415,7 +439,7 @@ impl Indexer {
 
     /// `(height, best block hash)` according to the indexer.
     pub fn tip(&self) -> Result<(u64, String), DogecoinSdkError> {
-        let info = self.sochain_get(&format!("network_info/{SOCHAIN_NETWORK}"))?;
+        let info = self.sochain_get(&format!("network_info/{}", self.cfg.sochain_network))?;
         let height = info
             .get("block_count")
             .and_then(Value::as_u64)
@@ -443,7 +467,8 @@ impl Indexer {
         let mut outputs: Vec<Value> = Vec::new();
         for page in 1..=MAX_UTXO_PAGES {
             let data = self.sochain_get(&format!(
-                "unspent_outputs/{SOCHAIN_NETWORK}/{address}/{page}"
+                "unspent_outputs/{}/{address}/{page}",
+                self.cfg.sochain_network
             ))?;
             let list = data
                 .get("outputs")
@@ -639,7 +664,10 @@ impl Indexer {
         let mut merged: Vec<UtxoHistoryEntry> = Vec::new();
         let mut used: Vec<usize> = Vec::new();
         for (position, address) in addresses.iter().enumerate() {
-            let data = self.sochain_get(&format!("transactions/{SOCHAIN_NETWORK}/{address}/1"))?;
+            let data = self.sochain_get(&format!(
+                "transactions/{}/{address}/1",
+                self.cfg.sochain_network
+            ))?;
             let list = data
                 .get("transactions")
                 .and_then(Value::as_array)
@@ -728,7 +756,7 @@ impl Indexer {
         if !is_txid(txid) {
             return Err(err("invalid", "txid"));
         }
-        match self.sochain_get(&format!("transaction/{SOCHAIN_NETWORK}/{txid}")) {
+        match self.sochain_get(&format!("transaction/{}/{txid}", self.cfg.sochain_network)) {
             Ok(data) => {
                 if data.get("hash").and_then(Value::as_str) != Some(txid) {
                     return Err(err(

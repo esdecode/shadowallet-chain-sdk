@@ -105,8 +105,8 @@ impl DogeEngine {
         )
     }
 
-    /// Open on the public-testnet indexer backend. Only the Dogecoin testnet may use it: the genesis
-    /// identity of both services is verified before the first read and signing never depends on it.
+    /// Open on the public indexer backend. The configured SoChain selector and genesis hash must match
+    /// the requested Dogecoin network.
     pub fn open_indexer(
         network: DogeNetwork,
         xpub: &str,
@@ -114,9 +114,18 @@ impl DogeEngine {
         config: IndexerConfig,
         db_path: &Path,
     ) -> Result<Self, DogecoinSdkError> {
-        if network != DogeNetwork::Testnet {
+        let selector = match network {
+            DogeNetwork::Mainnet => "DOGE",
+            DogeNetwork::Testnet => "DOGETEST",
+            DogeNetwork::Regtest => {
+                return Err(DogecoinSdkError::Transaction(
+                    "the public indexer backend does not support Dogecoin regtest".to_owned(),
+                ));
+            }
+        };
+        if config.sochain_network != selector {
             return Err(DogecoinSdkError::Transaction(
-                "the public indexer backend is for the Dogecoin testnet only".to_owned(),
+                "the public indexer configuration does not match the Dogecoin network".to_owned(),
             ));
         }
         let indexer = Indexer::new(config)?;
@@ -201,8 +210,8 @@ impl DogeEngine {
         self.indexer().is_some()
     }
 
-    /// Prove both services of the indexer backend are the Dogecoin testnet and agree on a recent block
-    /// (memoised). A node backend is verified separately by its caller; this is then a no-op.
+    /// Prove both services of the indexer backend are the selected Dogecoin network and agree on a
+    /// recent block (memoised). A node backend is verified separately by its caller; this is then a no-op.
     pub fn verify_backend_identity(&self) -> Result<(), DogecoinSdkError> {
         match self.indexer() {
             Some(ix) => ix.ensure_identity(),
