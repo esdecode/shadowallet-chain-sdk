@@ -21,6 +21,7 @@ hex.workspace = true
 thiserror.workspace = true
 bdk_bitcoind_rpc.workspace = true
 rusqlite.workspace = true
+shadowallet-chain-securedb = { path = "../chain-securedb", version = "0.1.0-alpha.1" }
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 

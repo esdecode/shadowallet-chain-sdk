@@ -3807,6 +3807,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shadowallet-chain-core",
+ "shadowallet-chain-securedb",
  "shadowallet-chain-utxo",
  "thiserror",
 ]
@@ -3847,6 +3848,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shadowallet-chain-core",
+ "shadowallet-chain-securedb",
  "shadowallet-chain-utxo",
  "tempfile",
  "thiserror",
@@ -3904,6 +3906,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shadowallet-chain-core",
+ "shadowallet-chain-securedb",
  "shadowallet-chain-utxo",
  "thiserror",
  "tokio",

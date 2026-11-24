@@ -139,7 +139,8 @@ impl LtcEngine {
             std::fs::create_dir_all(parent)
                 .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
         }
-        let db = Sqlite::open(db_path).map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
+        let db = shadowallet_chain_securedb::open_resolved(db_path)
+            .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
         db.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| LitecoinSdkError::Transaction(e.to_string()))?;
         db.pragma_update(None, "journal_mode", "WAL")
