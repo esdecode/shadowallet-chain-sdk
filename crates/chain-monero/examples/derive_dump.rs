@@ -13,7 +13,20 @@ fn main() {
     let net = |n: Network| {
         let a = MoneroAccount::from_seed(n, &seed, 0).expect("derive");
         let subs: Vec<String> = (1..=5).map(|i| a.address_at(i).to_string()).collect();
-        serde_json::json!({"primary": a.primary_address().to_string(), "subaddresses": subs})
+        // Monero accounts (major indexes): (account, index) pairs including accounts above 0 and index 0 of an account
+        let accounts: serde_json::Map<String, serde_json::Value> =
+            [(0, 0), (1, 0), (1, 1), (2, 7), (5, 0), (9, 7), (63, 10_000)]
+                .into_iter()
+                .map(|(acct, i)| {
+                    (
+                        format!("{acct}/{i}"),
+                        serde_json::Value::String(
+                            a.address_in(acct, i).expect("index").to_string(),
+                        ),
+                    )
+                })
+                .collect();
+        serde_json::json!({"primary": a.primary_address().to_string(), "subaddresses": subs, "account_subaddresses": accounts})
     };
     let main = MoneroAccount::from_seed(Network::Mainnet, &seed, 0).expect("derive");
     let out = serde_json::json!({
