@@ -3917,6 +3917,7 @@ dependencies = [
  "bip39",
  "crc32fast",
  "curve25519-dalek",
+ "futures-util",
  "hex",
  "monero-daemon-rpc",
  "monero-wallet",

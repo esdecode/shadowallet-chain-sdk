@@ -27,6 +27,7 @@ rusqlite.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 reqwest = { workspace = true, features = ["socks"] }
 serde_json.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"

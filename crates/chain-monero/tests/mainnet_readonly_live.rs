@@ -145,3 +145,31 @@ async fn the_default_build_refuses_to_prepare_a_mainnet_send() {
         "{err}"
     );
 }
+
+/// Read-only throughput of a bounded mainnet scan (400 blocks) with concurrent fetching; prints blocks per second.
+#[tokio::test]
+#[ignore = "network"]
+async fn mainnet_scan_throughput_400_blocks() {
+    let node = connect(MAINNET, NODE, None).await.unwrap();
+    let tip = node.daemon.latest_block_number().await.unwrap() as u64;
+    let dir = tempfile::tempdir().unwrap();
+    let acct = account();
+    let store = MoneroStore::open(&dir.path().join("t.db")).unwrap();
+    let restore = tip - 1000;
+    store
+        .register_account(
+            "monero-mainnet",
+            &acct.primary_address().to_string(),
+            restore,
+        )
+        .unwrap();
+    let started = Instant::now();
+    let r = sync(&store, &acct, &node, 400).await.unwrap();
+    let secs = started.elapsed().as_secs_f64();
+    println!(
+        "THROUGHPUT {r:?}: 400 blocks in {secs:.1}s = {:.1} blocks/s",
+        400.0 / secs
+    );
+    assert_eq!(r.to, restore + 399);
+    assert_eq!(r.new_outputs, 0);
+}

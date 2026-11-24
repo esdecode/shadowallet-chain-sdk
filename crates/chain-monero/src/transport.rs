@@ -10,11 +10,14 @@ use std::time::Duration;
 use monero_daemon_rpc::HttpTransport;
 use monero_wallet::interface::InterfaceError;
 
+/// Requests allowed in flight at once (matches the scan window in `sync.rs`).
+const MAX_IN_FLIGHT: usize = 4;
+
 #[derive(Clone)]
 pub struct ProxyTransport {
     client: reqwest::Client,
     base: String,
-    one_at_a_time: Arc<tokio::sync::Mutex<()>>,
+    in_flight: Arc<tokio::sync::Semaphore>,
 }
 
 impl ProxyTransport {
@@ -53,7 +56,7 @@ impl ProxyTransport {
         Ok(Self {
             client,
             base: url.trim_end_matches('/').to_owned(),
-            one_at_a_time: Arc::new(tokio::sync::Mutex::new(())),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
         })
     }
 }
@@ -67,10 +70,13 @@ impl HttpTransport for ProxyTransport {
     ) -> impl Send + std::future::Future<Output = Result<Vec<u8>, InterfaceError>> {
         let url = format!("{}/{route}", self.base);
         let client = self.client.clone();
-        let gate = self.one_at_a_time.clone();
+        let gate = self.in_flight.clone();
         async move {
-            // the daemon must be read in full before the next request is made
-            let _guard = gate.lock().await;
+            // bounded concurrency: each response is read in full by its own request, public nodes see at most this many
+            let _permit = gate
+                .acquire()
+                .await
+                .map_err(|_| InterfaceError::InternalError("transport closed".to_owned()))?;
             let mut response = client
                 .post(url)
                 .body(body)
