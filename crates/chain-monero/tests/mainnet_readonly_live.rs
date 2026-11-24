@@ -172,4 +172,16 @@ async fn mainnet_scan_throughput_400_blocks() {
     );
     assert_eq!(r.to, restore + 399);
     assert_eq!(r.new_outputs, 0);
+    // No missed or duplicated block: the store keeps the last 200 hashes; every one must exist and equal the node's hash
+    // for that height (a skipped or misordered block would leave a hole or a mismatch).
+    use monero_wallet::interface::ProvidesBlockchain;
+    for h in (r.to - 199)..=r.to {
+        let stored = store
+            .block_hash(h)
+            .unwrap()
+            .unwrap_or_else(|| panic!("hole at {h}"));
+        let on_node = node.daemon.block_hash(h as usize).await.unwrap();
+        assert_eq!(stored, on_node, "hash mismatch at {h}");
+    }
+    assert_eq!(store.scanned_height().unwrap() as u64, r.to);
 }
