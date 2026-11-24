@@ -252,6 +252,9 @@ pub struct Balances {
     pub orchard_spendable: u64,
     pub orchard_pending: u64,
     pub sapling_total: u64,
+    /// Sapling value that can be spent now / is still waiting for confirmations (their sum is `sapling_total`).
+    pub sapling_spendable: u64,
+    pub sapling_pending: u64,
     pub transparent_spendable: u64,
     pub transparent_pending: u64,
     pub chain_tip: u32,
@@ -281,7 +284,11 @@ pub fn balances(w: &ZcashWallet) -> Result<Balances, ZcashError> {
         out.orchard_spendable = u64::from(o.spendable_value());
         out.orchard_pending =
             u64::from(o.change_pending_confirmation()) + u64::from(o.value_pending_spendability());
-        out.sapling_total = u64::from(b.sapling_balance().total());
+        let s = b.sapling_balance();
+        out.sapling_total = u64::from(s.total());
+        out.sapling_spendable = u64::from(s.spendable_value());
+        out.sapling_pending =
+            u64::from(s.change_pending_confirmation()) + u64::from(s.value_pending_spendability());
         let t = b.unshielded_balance();
         out.transparent_spendable = u64::from(t.spendable_value());
         out.transparent_pending =
