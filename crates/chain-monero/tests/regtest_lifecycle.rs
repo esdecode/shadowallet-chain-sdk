@@ -746,3 +746,53 @@ async fn funds_in_several_accounts_are_attributed_and_recovered_from_the_seed() 
         );
     }
 }
+
+/// Funds beyond the default lookahead are not found by a restore with the defaults, and are found after the user widens the
+/// lookahead and rescans. Nothing is silently skipped: the wallet's own account count tells what it looked at.
+#[tokio::test]
+async fn widening_the_lookahead_and_rescanning_finds_funds_beyond_the_default() {
+    let Some((d, dir)) = chain_with_funds().await else {
+        eprintln!("SKIPPED: SHADOWALLET_MONEROD is not set");
+        return;
+    };
+    let (acct, rcpt) = (sender(), recipient());
+    let node = connect(MAINNET, &d.url, None).await.unwrap();
+    let store = open_store(dir.path(), "sender.db", &acct);
+    sync(&store, &acct, &node, 1000).await.unwrap();
+    // account 20 is far beyond 1 known account + 5 lookahead; index 300 is beyond the 200 default of an unissued account
+    let to = rcpt.address_in(20, 300).unwrap().to_string();
+    let prepared = prepare_send(
+        &store,
+        &acct,
+        &node,
+        &to,
+        2 * XMR,
+        FeePriority::Unimportant,
+        None,
+    )
+    .await
+    .unwrap();
+    let fee = prepared.fee;
+    let tx = sign_prepared(&acct, &node, prepared).unwrap();
+    publish_signed(&store, &node, &tx, &to, 2 * XMR, fee, 1)
+        .await
+        .unwrap();
+    d.generate(&acct.primary_address().to_string(), 1).await;
+
+    let restored = open_store(dir.path(), "restored.db", &rcpt);
+    sync(&restored, &rcpt, &node, 1000).await.unwrap();
+    assert_eq!(
+        balance(&restored).unwrap().total,
+        0,
+        "outside the default lookahead"
+    );
+    assert_eq!(restored.account_count().unwrap(), 1);
+
+    restored.set_lookahead(25, 400).unwrap();
+    restored.rescan_from_restore_height().unwrap();
+    sync(&restored, &rcpt, &node, 1000).await.unwrap();
+    assert_eq!(account_balance(&restored, 20).unwrap().total, 2 * XMR);
+    assert_eq!(restored.account_count().unwrap(), 21);
+    let o = restored.outputs().unwrap().into_iter().next().unwrap();
+    assert_eq!(o.subaddress, Some((20, 300)));
+}

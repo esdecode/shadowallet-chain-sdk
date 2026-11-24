@@ -21,8 +21,8 @@ pub use network::{MAINNET, MoneroNet, NETS, STAGENET, TESTNET};
 pub use seed::{generate_seed_words, seed_to_words, words_to_seed};
 pub use send::{PreparedSend, RING_SIZE, prepare_send, publish_signed, sign_prepared};
 pub use store::{
-    ACCOUNT_LOOKAHEAD, MAX_ACCOUNTS, MAX_SUBADDRESS_INDEX, MoneroStore, OwnedOutput,
-    SUBADDRESS_LOOKAHEAD, TxRecord,
+    ACCOUNT_LOOKAHEAD, MAX_ACCOUNT_LOOKAHEAD, MAX_ACCOUNTS, MAX_SUBADDRESS_INDEX,
+    MAX_SUBADDRESS_LOOKAHEAD, MoneroStore, OwnedOutput, SUBADDRESS_LOOKAHEAD, TxRecord,
 };
 pub use sync::{
     Balance, Daemon, Node, PENDING_EXPIRY_MS, SyncReport, account_balance, balance, connect,

@@ -13,8 +13,8 @@ use monero_wallet::{
 };
 
 use crate::{
-    ACCOUNT_LOOKAHEAD, MAX_ACCOUNTS, MAX_SUBADDRESS_INDEX, MoneroAccount, MoneroError, MoneroNet,
-    MoneroStore, OwnedOutput, SPEND_CONFIRMATIONS, SUBADDRESS_LOOKAHEAD, TxRecord,
+    MAX_ACCOUNTS, MAX_SUBADDRESS_INDEX, MoneroAccount, MoneroError, MoneroNet, MoneroStore,
+    OwnedOutput, SPEND_CONFIRMATIONS, TxRecord,
 };
 
 pub type Daemon = monero_daemon_rpc::MoneroDaemon<crate::ProxyTransport>;
@@ -212,14 +212,15 @@ pub async fn sync_cancellable(
     // pass are not missed.
     let mut registered: HashMap<u32, u32> = HashMap::new();
     let mut extend = |scanner: &mut Scanner, store: &MoneroStore| -> Result<(), MoneroError> {
+        let (look_accounts, look_subs) = store.lookahead()?;
         let accounts = store
             .account_count()?
-            .saturating_add(ACCOUNT_LOOKAHEAD)
+            .saturating_add(look_accounts)
             .min(MAX_ACCOUNTS);
         for a in 0..accounts {
             let known = a < store.account_count()?;
             let want = if known { store.last_issued_in(a)? } else { 0 }
-                .saturating_add(SUBADDRESS_LOOKAHEAD)
+                .saturating_add(look_subs)
                 .min(MAX_SUBADDRESS_INDEX);
             let from = match registered.get(&a) {
                 Some(done) if *done >= want => continue,

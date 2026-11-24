@@ -19,6 +19,9 @@ pub const MAX_SUBADDRESS_INDEX: u32 = 10_000;
 pub const ACCOUNT_LOOKAHEAD: u32 = 5;
 /// Subaddress indexes watched beyond the highest issued one, per account.
 pub const SUBADDRESS_LOOKAHEAD: u32 = 200;
+/// Upper bounds of the user-configurable recovery lookahead (every watched index costs scan time and memory).
+pub const MAX_ACCOUNT_LOOKAHEAD: u32 = 50;
+pub const MAX_SUBADDRESS_LOOKAHEAD: u32 = 2_000;
 
 pub struct MoneroStore {
     conn: Connection,
@@ -304,6 +307,70 @@ impl MoneroStore {
             self.watch_subaddress_in(account, next)?;
             Ok(next)
         })
+    }
+
+    /// Recovery lookahead `(accounts, subaddresses per account)`: the defaults unless the user widened it.
+    pub fn lookahead(&self) -> Result<(u32, u32), MoneroError> {
+        let read = |k: &str, default: u32, max: u32| -> Result<u32, MoneroError> {
+            match self.meta(k)? {
+                None => Ok(default),
+                Some(v) => v
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=max).contains(n))
+                    .ok_or_else(|| MoneroError::Store("invalid lookahead".to_owned())),
+            }
+        };
+        Ok((
+            read(
+                "lookahead_accounts",
+                ACCOUNT_LOOKAHEAD,
+                MAX_ACCOUNT_LOOKAHEAD,
+            )?,
+            read(
+                "lookahead_subaddresses",
+                SUBADDRESS_LOOKAHEAD,
+                MAX_SUBADDRESS_LOOKAHEAD,
+            )?,
+        ))
+    }
+
+    /// Widen (or narrow) the recovery lookahead. It takes effect at the next scan; funds that were skipped before need
+    /// [`rescan_from_restore_height`](Self::rescan_from_restore_height).
+    pub fn set_lookahead(&self, accounts: u32, subaddresses: u32) -> Result<(), MoneroError> {
+        if !(1..=MAX_ACCOUNT_LOOKAHEAD).contains(&accounts)
+            || !(1..=MAX_SUBADDRESS_LOOKAHEAD).contains(&subaddresses)
+        {
+            return Err(MoneroError::Store(format!(
+                "lookahead out of range (accounts 1..={MAX_ACCOUNT_LOOKAHEAD}, subaddresses 1..={MAX_SUBADDRESS_LOOKAHEAD})"
+            )));
+        }
+        self.apply_block(|| {
+            self.set_meta("lookahead_accounts", &accounts.to_string())?;
+            self.set_meta("lookahead_subaddresses", &subaddresses.to_string())
+        })
+    }
+
+    /// Forget everything found since the restore height and scan again (after the lookahead was widened). Refused while an
+    /// outgoing transaction is unconfirmed: its reservations must not be disturbed. Issued addresses and the account
+    /// count are kept; the account count only grows.
+    pub fn rescan_from_restore_height(&self) -> Result<(), MoneroError> {
+        let unconfirmed: i64 = self
+            .conn
+            .query_row(
+                "SELECT count(*) FROM xmr_tx WHERE direction='out' AND status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db)?;
+        if unconfirmed > 0 {
+            return Err(MoneroError::Store(
+                "an outgoing transaction is still unconfirmed; rescan after it confirms or fails"
+                    .to_owned(),
+            ));
+        }
+        let restore = self.restore_height()?;
+        self.apply_block(|| self.rollback_to(restore.saturating_sub(1)))
     }
 
     /// Number of Monero accounts (major indexes) this wallet uses; at least 1 (the primary account).
@@ -800,5 +867,57 @@ mod account_tests {
         assert!(s.next_subaddress_in(7).is_err(), "unknown account");
         assert!(s.watch_subaddress_in(a, MAX_SUBADDRESS_INDEX + 1).is_err());
         assert!(s.watch_subaddress_in(MAX_ACCOUNTS, 0).is_err());
+    }
+
+    #[test]
+    fn the_lookahead_has_safe_defaults_and_validated_bounds() {
+        let (_d, s) = store();
+        assert_eq!(
+            s.lookahead().unwrap(),
+            (ACCOUNT_LOOKAHEAD, SUBADDRESS_LOOKAHEAD)
+        );
+        s.set_lookahead(30, 1000).unwrap();
+        assert_eq!(s.lookahead().unwrap(), (30, 1000));
+        assert!(s.set_lookahead(0, 100).is_err());
+        assert!(s.set_lookahead(MAX_ACCOUNT_LOOKAHEAD + 1, 100).is_err());
+        assert!(s.set_lookahead(5, MAX_SUBADDRESS_LOOKAHEAD + 1).is_err());
+        assert_eq!(
+            s.lookahead().unwrap(),
+            (30, 1000),
+            "a refused change changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_rescan_restarts_at_the_restore_height_and_is_refused_while_a_spend_is_unconfirmed() {
+        let d = tempfile::tempdir().unwrap();
+        let s = MoneroStore::open(&d.path().join("r.db")).unwrap();
+        s.register_account("monero-stagenet", "5abc", 100).unwrap();
+        s.record_block(150, &[1u8; 32]).unwrap();
+        s.set_scanned(150).unwrap();
+        s.rescan_from_restore_height().unwrap();
+        assert_eq!(
+            s.scanned_height().unwrap(),
+            99,
+            "restore height - 1: the first block scanned is the restore height"
+        );
+        s.upsert_tx(&TxRecord {
+            txid: [9u8; 32],
+            direction: "out".to_owned(),
+            amount: 1,
+            fee: 1,
+            height: None,
+            status: "pending".to_owned(),
+            counterparty: None,
+            created_ms: 1,
+        })
+        .unwrap();
+        s.set_scanned(150).unwrap();
+        assert!(s.rescan_from_restore_height().is_err());
+        assert_eq!(
+            s.scanned_height().unwrap(),
+            150,
+            "refused: nothing was reset"
+        );
     }
 }
