@@ -671,3 +671,78 @@ async fn an_old_pending_transaction_is_expired_only_when_the_node_knows_neither_
     );
     assert_eq!(pending_row(&store, tx_c.hash()).0, "expired");
 }
+
+/// Monero accounts (major indexes): funds paid to subaddresses of several accounts are attributed to the right account,
+/// and a fresh store restored from the seed alone (it knows only account 0) rediscovers them, including an account that is
+/// reachable only because the watched range grows while the scan is running.
+#[tokio::test]
+async fn funds_in_several_accounts_are_attributed_and_recovered_from_the_seed() {
+    let Some((d, dir)) = chain_with_funds().await else {
+        eprintln!("SKIPPED: SHADOWALLET_MONEROD is not set");
+        return;
+    };
+    let (acct, rcpt) = (sender(), recipient());
+    let node = connect(MAINNET, &d.url, None).await.unwrap();
+    let store = open_store(dir.path(), "sender.db", &acct);
+    sync(&store, &acct, &node, 1000).await.unwrap();
+
+    // (account, index, amount): account 5 is inside the recovery lookahead of a fresh store, account 9 is not
+    let plan = [(1u32, 3u32, 2 * XMR), (5, 0, 3 * XMR), (9, 7, 4 * XMR)];
+    for (a, i, amount) in plan {
+        let to = rcpt.address_in(a, i).unwrap().to_string();
+        let prepared = prepare_send(
+            &store,
+            &acct,
+            &node,
+            &to,
+            amount,
+            FeePriority::Unimportant,
+            None,
+        )
+        .await
+        .unwrap();
+        let fee = prepared.fee;
+        let tx = sign_prepared(&acct, &node, prepared).unwrap();
+        publish_signed(&store, &node, &tx, &to, amount, fee, 1)
+            .await
+            .unwrap();
+        // one block per payment so they sit in strictly increasing heights
+        d.generate(&acct.primary_address().to_string(), 1).await;
+    }
+
+    // a wallet that created these accounts itself
+    let known = open_store(dir.path(), "recipient-known.db", &rcpt);
+    for _ in 0..9 {
+        known.new_account().unwrap();
+    }
+    sync(&known, &rcpt, &node, 1000).await.unwrap();
+    // a wallet restored from the seed only
+    let fresh = open_store(dir.path(), "recipient-fresh.db", &rcpt);
+    assert_eq!(fresh.account_count().unwrap(), 1);
+    sync(&fresh, &rcpt, &node, 1000).await.unwrap();
+
+    for (name, s) in [("known", &known), ("fresh", &fresh)] {
+        for (a, i, amount) in plan {
+            let b = account_balance(s, a).unwrap();
+            assert_eq!(b.total, amount, "{name}: account {a}");
+            let o = s
+                .outputs()
+                .unwrap()
+                .into_iter()
+                .find(|o| o.subaddress.map(|x| x.0) == Some(a))
+                .unwrap();
+            assert_eq!(o.subaddress, Some((a, i)), "{name}: account {a}");
+        }
+        assert_eq!(account_balance(s, 0).unwrap().total, 0, "{name}");
+        assert_eq!(balance(s).unwrap().total, 9 * XMR, "{name}");
+        assert_eq!(s.account_count().unwrap(), 10, "{name}");
+        // the issued marks follow the funds, per account, and never leak into another account
+        assert_eq!(s.last_issued_in(9).unwrap(), 7, "{name}");
+        assert_eq!(s.last_issued_in(1).unwrap(), 3, "{name}");
+        assert_eq!(
+            s.last_issued_in(0).unwrap(),
+            0,
+            "{name}: account 0 untouched"
+        );
+    }
+}

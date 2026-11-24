@@ -90,10 +90,17 @@ impl MoneroAccount {
 
     /// Subaddress `(account 0, index)`; index 0 is the primary address.
     pub fn address_at(&self, index: u32) -> MoneroAddress {
-        match SubaddressIndex::new(0, index) {
-            Some(i) => self.pair.subaddress(self.network, i),
-            None => self.primary_address(),
+        self.address_in(0, index)
+            .unwrap_or_else(|| self.primary_address())
+    }
+
+    /// Subaddress `(account, index)` in Monero's own (major, minor) scheme: account 0 index 0 is the primary address,
+    /// every other pair is a subaddress. `None` only for an index pair the protocol rejects.
+    pub fn address_in(&self, account: u32, index: u32) -> Option<MoneroAddress> {
+        if account == 0 && index == 0 {
+            return Some(self.primary_address());
         }
+        SubaddressIndex::new(account, index).map(|i| self.pair.subaddress(self.network, i))
     }
 
     /// Key image of an owned output: `(spend + key_offset) * hash_to_point(output key)`. Needs the spend key, so it is

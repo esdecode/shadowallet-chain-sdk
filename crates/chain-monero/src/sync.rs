@@ -13,7 +13,8 @@ use monero_wallet::{
 };
 
 use crate::{
-    MoneroAccount, MoneroError, MoneroNet, MoneroStore, OwnedOutput, SPEND_CONFIRMATIONS, TxRecord,
+    ACCOUNT_LOOKAHEAD, MAX_ACCOUNTS, MAX_SUBADDRESS_INDEX, MoneroAccount, MoneroError, MoneroNet,
+    MoneroStore, OwnedOutput, SPEND_CONFIRMATIONS, SUBADDRESS_LOOKAHEAD, TxRecord,
 };
 
 pub type Daemon = monero_daemon_rpc::MoneroDaemon<crate::ProxyTransport>;
@@ -205,14 +206,37 @@ pub async fn sync_cancellable(
         .map(|o| (o.key_image, o.amount))
         .collect();
     let mut scanner = Scanner::new(account.view_pair().clone());
-    // Watch every issued address and a recovery lookahead. Never silently stop
-    // at the twentieth address once additional receive addresses are issued.
-    let watched_end = store.last_issued_subaddress()?.saturating_add(200).max(200);
-    for i in 1..=watched_end {
-        if let Some(index) = SubaddressIndex::new(0, i) {
-            scanner.register_subaddress(index);
+    // Watch every issued subaddress of every known account plus a recovery lookahead (accounts beyond the known ones,
+    // indexes beyond the issued ones). Never silently stop at the twentieth address once more are issued. The range
+    // grows while scanning: funds found at the edge of the lookahead widen it immediately, so later blocks of the same
+    // pass are not missed.
+    let mut registered: HashMap<u32, u32> = HashMap::new();
+    let mut extend = |scanner: &mut Scanner, store: &MoneroStore| -> Result<(), MoneroError> {
+        let accounts = store
+            .account_count()?
+            .saturating_add(ACCOUNT_LOOKAHEAD)
+            .min(MAX_ACCOUNTS);
+        for a in 0..accounts {
+            let known = a < store.account_count()?;
+            let want = if known { store.last_issued_in(a)? } else { 0 }
+                .saturating_add(SUBADDRESS_LOOKAHEAD)
+                .min(MAX_SUBADDRESS_INDEX);
+            let from = match registered.get(&a) {
+                Some(done) if *done >= want => continue,
+                Some(done) => done + 1,
+                None if a == 0 => 1, // (0,0) is the primary address, handled by the scanner itself
+                None => 0,
+            };
+            for i in from..=want {
+                if let Some(index) = SubaddressIndex::new(a, i) {
+                    scanner.register_subaddress(index);
+                }
+            }
+            registered.insert(a, want);
         }
-    }
+        Ok(())
+    };
+    extend(&mut scanner, store)?;
     let end = tip.min(start + max_blocks as u64 - 1);
     let mut next = start;
     while next <= end {
@@ -284,7 +308,9 @@ pub async fn sync_cancellable(
                     let key_image = account.key_image(out.key_offset(), out.key());
                     let amount = out.commitment().amount;
                     if let Some(sub) = out.subaddress() {
-                        store.watch_subaddress(sub.address())?;
+                        store.ensure_account_count(sub.account() + 1)?;
+                        store.watch_subaddress_in(sub.account(), sub.address())?;
+                        extend(&mut scanner, store)?;
                     }
                     let owned_output = OwnedOutput {
                         id: 0,
@@ -358,12 +384,22 @@ pub async fn sync_cancellable(
 
 /// Balances as of the stored tip. Outputs reserved by a prepared send are not counted as unlocked.
 pub fn balance(store: &MoneroStore) -> Result<Balance, MoneroError> {
+    balance_filtered(store, None)
+}
+
+/// Balance of one Monero account (major index); funds received on the primary address belong to account 0.
+pub fn account_balance(store: &MoneroStore, account: u32) -> Result<Balance, MoneroError> {
+    balance_filtered(store, Some(account))
+}
+
+fn balance_filtered(store: &MoneroStore, account: Option<u32>) -> Result<Balance, MoneroError> {
     let tip: u64 = store.meta("tip")?.and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut b = Balance::default();
     for o in store
         .outputs()?
         .into_iter()
         .filter(|o| o.spent_in.is_none())
+        .filter(|o| account.is_none_or(|a| o.subaddress.map_or(0, |s| s.0) == a))
     {
         b.total += o.amount;
         let confirmed = tip + 1 >= o.height + SPEND_CONFIRMATIONS as u64;

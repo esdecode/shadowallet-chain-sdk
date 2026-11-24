@@ -12,6 +12,14 @@ fn db(e: rusqlite::Error) -> MoneroError {
     MoneroError::Store(e.to_string())
 }
 
+/// Accounts (major indexes) a wallet may use, and subaddress indexes per account. Both are wallet-side scan bounds.
+pub const MAX_ACCOUNTS: u32 = 64;
+pub const MAX_SUBADDRESS_INDEX: u32 = 10_000;
+/// During scanning (and seed recovery) this many accounts beyond the known ones are watched for incoming funds.
+pub const ACCOUNT_LOOKAHEAD: u32 = 5;
+/// Subaddress indexes watched beyond the highest issued one, per account.
+pub const SUBADDRESS_LOOKAHEAD: u32 = 200;
+
 pub struct MoneroStore {
     conn: Connection,
 }
@@ -231,37 +239,104 @@ impl MoneroStore {
         Ok(())
     }
 
+    fn issued_key(account: u32) -> String {
+        if account == 0 {
+            "last_issued_subaddress".to_owned()
+        } else {
+            format!("last_issued_subaddress_{account}")
+        }
+    }
+
     /// Legacy wallets could display indexes 1..=20 without persisting them. Treat
     /// all of these as issued during migration, so a restart never reuses one.
     pub fn last_issued_subaddress(&self) -> Result<u32, MoneroError> {
-        let value = self.meta("last_issued_subaddress")?;
-        match value {
-            None => Ok(20),
+        self.last_issued_in(0)
+    }
+
+    /// High-water mark of issued subaddress indexes of one Monero account (major index).
+    pub fn last_issued_in(&self, account: u32) -> Result<u32, MoneroError> {
+        match self.meta(&Self::issued_key(account))? {
+            None => Ok(if account == 0 { 20 } else { 0 }),
             Some(v) => v
                 .parse::<u32>()
                 .ok()
-                .filter(|i| *i <= 10_000)
+                .filter(|i| *i <= MAX_SUBADDRESS_INDEX)
                 .ok_or_else(|| MoneroError::Store("invalid subaddress high-water mark".to_owned())),
         }
     }
 
     pub fn watch_subaddress(&self, index: u32) -> Result<(), MoneroError> {
-        if index > 10_000 {
-            return Err(MoneroError::Store(
-                "subaddress index exceeds the supported 10000".to_owned(),
-            ));
+        self.watch_subaddress_in(0, index)
+    }
+
+    pub fn watch_subaddress_in(&self, account: u32, index: u32) -> Result<(), MoneroError> {
+        if index > MAX_SUBADDRESS_INDEX {
+            return Err(MoneroError::Store(format!(
+                "subaddress index exceeds the supported {MAX_SUBADDRESS_INDEX}"
+            )));
         }
-        let high = self.last_issued_subaddress()?.max(index);
-        self.set_meta("last_issued_subaddress", &high.to_string())
+        if account >= MAX_ACCOUNTS {
+            return Err(MoneroError::Store(format!(
+                "account index exceeds the supported {MAX_ACCOUNTS}"
+            )));
+        }
+        let high = self.last_issued_in(account)?.max(index);
+        self.set_meta(&Self::issued_key(account), &high.to_string())
     }
 
     /// Allocate and persist before displaying the address. A crash can skip an
     /// index, but must never cause an already displayed address to be reissued.
     pub fn next_subaddress(&self) -> Result<u32, MoneroError> {
+        self.next_subaddress_in(0)
+    }
+
+    pub fn next_subaddress_in(&self, account: u32) -> Result<u32, MoneroError> {
         self.apply_block(|| {
-            let next = self.last_issued_subaddress()? + 1;
-            self.watch_subaddress(next)?;
+            if account >= self.account_count()? {
+                return Err(MoneroError::Store("unknown account".to_owned()));
+            }
+            // account 0 index 0 is the primary address; any other account starts at its own index 0
+            let next = if account == 0 || self.meta(&Self::issued_key(account))?.is_some() {
+                self.last_issued_in(account)? + 1
+            } else {
+                0
+            };
+            self.watch_subaddress_in(account, next)?;
             Ok(next)
+        })
+    }
+
+    /// Number of Monero accounts (major indexes) this wallet uses; at least 1 (the primary account).
+    pub fn account_count(&self) -> Result<u32, MoneroError> {
+        match self.meta("account_count")? {
+            None => Ok(1),
+            Some(v) => v
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (1..=MAX_ACCOUNTS).contains(n))
+                .ok_or_else(|| MoneroError::Store("invalid account count".to_owned())),
+        }
+    }
+
+    /// Raise the account count to at least `n` (recovery found funds in a higher account). Never lowers it.
+    pub fn ensure_account_count(&self, n: u32) -> Result<(), MoneroError> {
+        if n > MAX_ACCOUNTS {
+            return Err(MoneroError::Store(format!(
+                "account index exceeds the supported {MAX_ACCOUNTS}"
+            )));
+        }
+        if n > self.account_count()? {
+            self.set_meta("account_count", &n.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Create the next account and return its index. Persisted before the caller shows any address of it.
+    pub fn new_account(&self) -> Result<u32, MoneroError> {
+        self.apply_block(|| {
+            let index = self.account_count()?;
+            self.ensure_account_count(index + 1)?;
+            Ok(index)
         })
     }
 
@@ -686,5 +761,44 @@ mod tests {
         assert_eq!(s.release_unpublished_reservations().unwrap(), 0);
         let last = &s.outputs().unwrap()[2];
         assert!(!last.reserved && last.spent_in == Some([9; 32]));
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, MoneroStore) {
+        let d = tempfile::tempdir().unwrap();
+        let s = MoneroStore::open(&d.path().join("a.db")).unwrap();
+        s.register_account("monero-stagenet", "5abc", 0).unwrap();
+        (d, s)
+    }
+
+    #[test]
+    fn a_new_wallet_has_one_account_and_accounts_only_grow() {
+        let (_d, s) = store();
+        assert_eq!(s.account_count().unwrap(), 1);
+        assert_eq!(s.new_account().unwrap(), 1);
+        assert_eq!(s.new_account().unwrap(), 2);
+        s.ensure_account_count(1).unwrap();
+        assert_eq!(s.account_count().unwrap(), 3, "never lowered");
+        assert!(s.ensure_account_count(MAX_ACCOUNTS + 1).is_err());
+    }
+
+    #[test]
+    fn subaddress_marks_are_per_account_and_never_reissued() {
+        let (_d, s) = store();
+        let a = s.new_account().unwrap();
+        // the first address of a secondary account is its own index 0, then 1, 2 ...
+        assert_eq!(s.next_subaddress_in(a).unwrap(), 0);
+        assert_eq!(s.next_subaddress_in(a).unwrap(), 1);
+        // account 0 has its own mark and is not affected
+        assert_eq!(s.next_subaddress().unwrap(), 1);
+        assert_eq!(s.next_subaddress_in(a).unwrap(), 2);
+        assert_eq!(s.last_issued_in(a).unwrap(), 2);
+        assert!(s.next_subaddress_in(7).is_err(), "unknown account");
+        assert!(s.watch_subaddress_in(a, MAX_SUBADDRESS_INDEX + 1).is_err());
+        assert!(s.watch_subaddress_in(MAX_ACCOUNTS, 0).is_err());
     }
 }
