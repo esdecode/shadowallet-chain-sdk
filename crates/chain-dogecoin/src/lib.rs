@@ -441,13 +441,33 @@ mod tests {
             &[utxo(10_000_000, 0)],
             &a.address(0, 9).unwrap().to_string(),
             5_000_000,
-            1,
+            // Dogecoin Core's minimum relay fee: 0.001 DOGE/kB = 100 koinu/B (enforced by DOGECOIN_FEE_POLICY)
+            100,
             0,
         )
         .unwrap();
         assert!(unsigned.is_unsigned());
-        assert_eq!(unsigned.change_sats, 4_999_774);
+        // 10_000_000 - 5_000_000 - (226 B * 100 koinu/B)
+        assert_eq!(unsigned.change_sats, 4_977_400);
         assert_eq!(unsigned.transaction.output.len(), 2);
+    }
+
+    #[test]
+    fn a_fee_rate_below_dogecoin_cores_minimum_relay_fee_is_refused() {
+        let a = account();
+        let to = a.address(0, 9).unwrap().to_string();
+        for rate in [1, 50, 99] {
+            assert!(
+                matches!(
+                    prepare_transfer(&a, &[utxo(10_000_000, 0)], &to, 5_000_000, rate, 0),
+                    Err(DogecoinSdkError::Fee(
+                        shadowallet_chain_utxo::FeePolicyError::RateTooLow
+                    ))
+                ),
+                "rate {rate} must be refused: the network would not relay it"
+            );
+        }
+        assert!(prepare_transfer(&a, &[utxo(10_000_000, 0)], &to, 5_000_000, 100, 0).is_ok());
     }
 
     #[test]
@@ -458,7 +478,8 @@ mod tests {
             &[utxo(10_000_000, 0)],
             &a.address(0, 9).unwrap().to_string(),
             5_000_000,
-            1,
+            // Dogecoin Core's minimum relay fee: 0.001 DOGE/kB = 100 koinu/B (enforced by DOGECOIN_FEE_POLICY)
+            100,
             0,
         )
         .unwrap();
@@ -476,7 +497,8 @@ mod tests {
             &[utxo(10_000_000, 0)],
             &a.address(0, 9).unwrap().to_string(),
             5_000_000,
-            1,
+            // Dogecoin Core's minimum relay fee: 0.001 DOGE/kB = 100 koinu/B (enforced by DOGECOIN_FEE_POLICY)
+            100,
             0,
         )
         .unwrap();
