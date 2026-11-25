@@ -76,6 +76,20 @@ fn intent_digest(parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// A cheap read that proves the connection is alive before it is relied on. A channel opened earlier can have been
+/// dropped silently while idle (nothing drives keep-alives between calls); the first request on it fails and the next
+/// one reconnects, so a few attempts are made.
+async fn reach(client: &mut Client) -> Result<(), ZcashError> {
+    let mut attempt = 0;
+    loop {
+        match crate::latest_height(client).await {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt >= 2 => return Err(error),
+            Err(_) => attempt += 1,
+        }
+    }
+}
+
 /// What a successful [`sign_and_broadcast`] did, with the real time each stage took.
 #[derive(Clone, Debug)]
 pub struct SendReport {
@@ -207,6 +221,12 @@ pub async fn sign_and_broadcast(
             "the prepared payment no longer matches its commitment".to_owned(),
         ));
     }
+    // an unreachable server fails HERE, before anything is signed or any note is reserved
+    reach(client).await.map_err(|e| {
+        ZcashError::Server(format!(
+            "the server cannot be reached, nothing was signed: {e}"
+        ))
+    })?;
     let started = std::time::Instant::now();
     let usk = crate::account::spending_key(w.net, seed, account_index)?;
     // the key must belong to the account the proposal was built for
@@ -250,6 +270,12 @@ pub async fn sign_and_broadcast(
         let mut data = Vec::new();
         tx.write(&mut data)
             .map_err(|e| ZcashError::Send(format!("{e}")))?;
+        // proving takes long enough for the connection to go stale again: renew it before handing over the bytes, so
+        // that a dead connection is reported as "not sent" instead of as an unknown outcome
+        reach(client).await.map_err(|e| ZcashError::NotSubmitted {
+            txid: txid.to_string(),
+            reason: e.to_string(),
+        })?;
         let response = client
             .send_transaction(RawTransaction { data, height: 0 })
             .await

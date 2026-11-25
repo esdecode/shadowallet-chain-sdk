@@ -47,6 +47,12 @@ pub enum ZcashError {
         "broadcast outcome unknown for transaction {txid}: {reason}. It may have reached the network: synchronize and check the history before sending again"
     )]
     BroadcastUncertain { txid: String, reason: String },
+    /// The transaction was signed but never handed to the server, so it is certainly not on the network. The wallet
+    /// database keeps its notes reserved until it expires.
+    #[error(
+        "transaction {txid} was signed but NOT sent, the server could not be reached: {reason}. Its funds stay reserved until it expires: synchronize before preparing another payment"
+    )]
+    NotSubmitted { txid: String, reason: String },
     /// The server answered and refused the signed transaction.
     #[error("the server refused transaction {txid} ({code}): {reason}")]
     BroadcastRejected {
