@@ -22,6 +22,9 @@ zcash_primitives = { version = "0.31", default-features = false }
 zcash_address = { version = "0.14", default-features = false }
 zip32 = { version = "0.3", default-features = false }
 secrecy = "0.8"
+# Canonical (protobuf) encoding of a proposal and its digest: the payment-intent commitment.
+prost = { version = "0.14", default-features = false }
+sha2 = "0.10"
 hex.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
@@ -36,6 +39,8 @@ tonic = { version = "0.14", default-features = false, features = ["transport", "
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 
 [dev-dependencies]
+# examples/verify_tx.rs: proof and signature verification of a transaction with the official crate
+orchard = { version = "0.16", default-features = false, features = ["circuit"] }
 bip39 = "2"
 tempfile = "3"
 

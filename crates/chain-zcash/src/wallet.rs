@@ -134,9 +134,10 @@ pub struct ServerInfo {
 /// name must match and the Sapling activation height must be this network's.
 pub async fn connect(net: ZcashNet, url: &str) -> Result<(Client, ServerInfo), ZcashError> {
     net.validate()?;
-    if !url.starts_with("https://") && !url.starts_with("http://") {
+    if !transport_allowed(url) {
         return Err(ZcashError::Server(
-            "the server URL must be http(s)".to_owned(),
+            "the server URL must be https (plain http is accepted only for a node on this device)"
+                .to_owned(),
         ));
     }
     // Several TLS backends are present in the dependency graph; select ring explicitly (ignore "already set").
@@ -189,6 +190,26 @@ pub async fn connect(net: ZcashNet, url: &str) -> Result<(Client, ServerInfo), Z
         vendor: info.vendor,
     };
     Ok((client, info))
+}
+
+/// TLS for every remote server; cleartext only to the loopback interface (a local node or a local test proxy).
+fn transport_allowed(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // user info would let "http://127.0.0.1@evil.example" read as loopback
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 pub async fn latest_height(client: &mut Client) -> Result<u32, ZcashError> {
@@ -377,4 +398,31 @@ async fn open_wallet_inner(
         account,
         ufvk,
     })
+}
+
+#[cfg(test)]
+mod transport_tests {
+    #[test]
+    fn cleartext_is_loopback_only() {
+        for ok in [
+            "https://zec.rocks:443",
+            "http://127.0.0.1:9067",
+            "http://localhost:9067",
+            "http://[::1]:9067/",
+        ] {
+            assert!(super::transport_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "http://zec.rocks:443",
+            "http://10.0.2.2:9067",
+            "http://127.0.0.1.evil.example",
+            "http://localhost.evil.example:80",
+            "http://127.0.0.1@evil.example",
+            "http://evil.example/127.0.0.1",
+            "ftp://127.0.0.1",
+            "zec.rocks:443",
+        ] {
+            assert!(!super::transport_allowed(bad), "{bad}");
+        }
+    }
 }

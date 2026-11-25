@@ -36,6 +36,54 @@ pub struct PreparedSend {
     /// True when the recipient address has a shielded (Orchard) receiver the funds will go to.
     pub shielded_recipient: bool,
     pub has_memo: bool,
+    /// The network and account (viewing key) the proposal was built from.
+    net: crate::ZcashNet,
+    account_key: String,
+    /// See [`PreparedSend::commitment`].
+    commitment: [u8; 32],
+}
+
+impl PreparedSend {
+    /// SHA-256 over what is decided at preparation and then signed: network, account and the canonical protobuf
+    /// encoding of the whole proposal (payment request with recipient, amount and memo; selected inputs; change outputs
+    /// and pools; fee; anchor and target heights). An approval must name this value.
+    pub fn commitment(&self) -> [u8; 32] {
+        self.commitment
+    }
+
+    fn digest(
+        net: crate::ZcashNet,
+        account_key: &str,
+        proposal: &Proposal<StandardFeeRule, <Db as InputSource>::NoteRef>,
+    ) -> [u8; 32] {
+        use prost::Message as _;
+        let body =
+            zcash_client_backend::proto::proposal::Proposal::from_standard_proposal(proposal)
+                .encode_to_vec();
+        intent_digest(&[net.name.as_bytes(), account_key.as_bytes(), &body])
+    }
+}
+
+/// Domain-separated, length-prefixed SHA-256: no two different part lists hash the same bytes.
+fn intent_digest(parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"shadowallet-zcash-intent-v1");
+    for part in parts {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part);
+    }
+    h.finalize().into()
+}
+
+/// What a successful [`sign_and_broadcast`] did, with the real time each stage took.
+#[derive(Clone, Debug)]
+pub struct SendReport {
+    pub txids: Vec<String>,
+    /// Key derivation, proof generation and signing (the reference builder does the last two in one call).
+    pub prove_sign_ms: u64,
+    /// Handing the signed bytes to the server and receiving its answer.
+    pub submit_ms: u64,
 }
 
 /// Build a proposal paying `amount` zatoshi to `to` (a unified, or transparent address; the memo is only allowed for
@@ -101,7 +149,12 @@ pub fn prepare_send(
             "a memo can only be sent to a shielded address".to_owned(),
         ));
     }
+    let account_key = account_key(w)?;
+    let commitment = PreparedSend::digest(w.net, &account_key, &proposal);
     Ok(PreparedSend {
+        net: w.net,
+        account_key,
+        commitment,
         steps: proposal.steps().len(),
         proposal,
         to: to.trim().to_owned(),
@@ -110,6 +163,12 @@ pub fn prepare_send(
         shielded_recipient,
         has_memo: memo_bytes.is_some(),
     })
+}
+
+fn account_key(w: &ZcashWallet) -> Result<String, ZcashError> {
+    w.ufvk
+        .encode(&w.net.params())
+        .map_err(|e| ZcashError::Wallet(format!("{e:?}")))
 }
 
 fn change_pool(net: crate::ZcashNet, height: BlockHeight) -> ShieldedPool {
@@ -121,18 +180,34 @@ fn change_pool(net: crate::ZcashNet, height: BlockHeight) -> ShieldedPool {
 }
 
 /// Create (prove and sign) the transactions of a prepared proposal and broadcast them. `seed` is the wallet seed
-/// (scoped, from the vault); the spending key is derived here and dropped at the end. Returns the txids.
+/// (scoped, from the vault); the spending key is derived here and dropped at the end.
+///
+/// A transport failure after signing is [`ZcashError::BroadcastUncertain`] and a refusal by the server is
+/// [`ZcashError::BroadcastRejected`]; both carry the txid.
 pub async fn sign_and_broadcast(
     w: &mut ZcashWallet,
     client: &mut Client,
     seed: &[u8],
     account_index: u32,
     prepared: PreparedSend,
-) -> Result<Vec<String>, ZcashError> {
+) -> Result<SendReport, ZcashError> {
     if !w.net.signing_enabled() {
         return Err(ZcashError::Send("mainnet signing is disabled".to_owned()));
     }
     let params = w.net.params();
+    // a proposal is only good for the exact network and account it was built from, and only unmodified
+    if prepared.net != w.net || prepared.account_key != account_key(w)? {
+        return Err(ZcashError::Send(
+            "the prepared payment belongs to another wallet or network".to_owned(),
+        ));
+    }
+    if PreparedSend::digest(w.net, &prepared.account_key, &prepared.proposal) != prepared.commitment
+    {
+        return Err(ZcashError::Send(
+            "the prepared payment no longer matches its commitment".to_owned(),
+        ));
+    }
+    let started = std::time::Instant::now();
     let usk = crate::account::spending_key(w.net, seed, account_index)?;
     // the key must belong to the account the proposal was built for
     if usk.to_unified_full_viewing_key().encode(&params) != w.ufvk.encode(&params) {
@@ -161,6 +236,8 @@ pub async fn sign_and_broadcast(
         None,
     )
     .map_err(|e| ZcashError::Send(format!("{e:?}")))?;
+    let prove_sign_ms = started.elapsed().as_millis() as u64;
+    let submitting = std::time::Instant::now();
     let mut out = Vec::new();
     for txid in txids {
         let tx = w
@@ -176,17 +253,25 @@ pub async fn sign_and_broadcast(
         let response = client
             .send_transaction(RawTransaction { data, height: 0 })
             .await
-            .map_err(|e| ZcashError::Server(e.to_string()))?
+            .map_err(|e| ZcashError::BroadcastUncertain {
+                txid: txid.to_string(),
+                reason: e.to_string(),
+            })?
             .into_inner();
         if response.error_code != 0 {
-            return Err(ZcashError::Send(format!(
-                "the server refused the transaction ({}): {}",
-                response.error_code, response.error_message
-            )));
+            return Err(ZcashError::BroadcastRejected {
+                txid: txid.to_string(),
+                code: response.error_code,
+                reason: response.error_message,
+            });
         }
         out.push(txid.to_string());
     }
-    Ok(out)
+    Ok(SendReport {
+        txids: out,
+        prove_sign_ms,
+        submit_ms: submitting.elapsed().as_millis() as u64,
+    })
 }
 
 #[cfg(test)]
@@ -202,6 +287,23 @@ mod tests {
             super::change_pool(crate::TESTNET, BlockHeight::from_u32(4_134_000)),
             ShieldedPool::Ironwood
         );
+    }
+    #[test]
+    fn the_intent_digest_changes_with_every_part_and_with_part_boundaries() {
+        use super::intent_digest;
+        let base = intent_digest(&[b"zcash-testnet", b"account", b"proposal"]);
+        assert_eq!(
+            base,
+            intent_digest(&[b"zcash-testnet", b"account", b"proposal"])
+        );
+        for other in [
+            intent_digest(&[b"zcash-mainnet", b"account", b"proposal"]),
+            intent_digest(&[b"zcash-testnet", b"account2", b"proposal"]),
+            intent_digest(&[b"zcash-testnet", b"account", b"proposaL"]),
+            intent_digest(&[b"zcash-testnet", b"accountproposal", b""]),
+        ] {
+            assert_ne!(base, other);
+        }
     }
     #[test]
     fn official_bundled_sapling_parameters_load_with_hash_verification() {

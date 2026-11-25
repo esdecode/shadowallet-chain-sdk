@@ -17,7 +17,7 @@ pub use account::{
     unified_address,
 };
 pub use net::{MAINNET, TESTNET, ZcashNet};
-pub use send::{PreparedSend, prepare_send, sign_and_broadcast};
+pub use send::{PreparedSend, SendReport, prepare_send, sign_and_broadcast};
 pub use sync::{
     Balances, CancelToken, SyncOutcome, TxRow, balances, current_address, history, new_address,
     sync, sync_cancellable, transparent_address_of, update_tip,
@@ -41,4 +41,17 @@ pub enum ZcashError {
     Wallet(String),
     #[error("send: {0}")]
     Send(String),
+    /// The signed transaction was handed to the network layer and no answer came back: it MAY be on the network. The
+    /// wallet database keeps it (its notes stay locked until it confirms or expires); it must not be sent again.
+    #[error(
+        "broadcast outcome unknown for transaction {txid}: {reason}. It may have reached the network: synchronize and check the history before sending again"
+    )]
+    BroadcastUncertain { txid: String, reason: String },
+    /// The server answered and refused the signed transaction.
+    #[error("the server refused transaction {txid} ({code}): {reason}")]
+    BroadcastRejected {
+        txid: String,
+        code: i32,
+        reason: String,
+    },
 }
